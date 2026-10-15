@@ -357,10 +357,11 @@ def update_delayed_tasks():
 	# End date passed and task not completed
 	overdue_tasks = frappe.get_all(
 		"Task",
-		filters={
-			"exp_end_date": ("<", current_date),
-			"task_status": ("not in", ["Completed", "In Delay", "Blocked"]),
-		},
+		filters=[
+			["exp_end_date", "is", "set"],
+			["exp_end_date", "<", current_date],
+			["task_status", "not in", ["Completed", "In Delay", "Blocked"]],
+		],
 		fields=["name"],
 	)
 
@@ -373,10 +374,11 @@ def update_delayed_tasks():
 	# Start date passed but work not started
 	not_started_tasks = frappe.get_all(
 		"Task",
-		filters={
-			"exp_start_date": ("<", current_date),
-			"task_status": ("not in", ["Completed", "In Progress", "In Delay", "Blocked"]),
-		},
+		filters=[
+			["exp_start_date", "is", "set"],
+			["exp_start_date", "<", current_date],
+			["task_status", "not in", ["Completed", "In Progress", "In Delay", "Blocked"]],
+		],
 		fields=["name"],
 	)
 
