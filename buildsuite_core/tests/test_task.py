@@ -3,10 +3,49 @@
 """Tests for BuildSuite Task customisations: task_status <-> native status sync
 (TSK-006/007) and single-assignee mapping onto Frappe-native _assign."""
 
+from unittest.mock import patch
+
 import frappe
 from frappe.utils import add_days, today
 
 from buildsuite_core.tests.base import BuildSuiteTestCase
+from buildsuite_core.utils.task import update_delayed_tasks
+
+
+class TestDelayedTasks(BuildSuiteTestCase):
+	def test_nightly_sweep_requires_dates_and_preserves_dated_rules(self):
+		project = self._make_project(company=self.company)
+		yesterday = add_days(today(), -1)
+		tomorrow = add_days(today(), 1)
+		cases = [
+			(None, None, "Yet To Start", "Yet To Start", "Open"),
+			(None, tomorrow, "Yet To Start", "Yet To Start", "Open"),
+			(yesterday, None, "Yet To Start", "In Delay", "Overdue"),
+			(None, yesterday, "Yet To Start", "In Delay", "Overdue"),
+			(tomorrow, tomorrow, "Yet To Start", "Yet To Start", "Open"),
+			(today(), today(), "Yet To Start", "Yet To Start", "Open"),
+			(yesterday, tomorrow, "In Progress", "In Progress", "Working"),
+			(yesterday, yesterday, "In Progress", "In Delay", "Overdue"),
+			(yesterday, yesterday, "Completed", "Completed", "Completed"),
+			(yesterday, yesterday, "Blocked", "Blocked", "Open"),
+			(yesterday, yesterday, "In Delay", "In Delay", "Overdue"),
+		]
+		tasks = []
+		for start, end, initial, expected, native in cases:
+			task = self._make_task(project.name, task_status=initial)
+			# Seed the pre-sweep state without insert/validate already flagging late dates.
+			frappe.db.set_value("Task", task.name, {"exp_start_date": start, "exp_end_date": end})
+			tasks.append((task, expected, native))
+
+		# The real scheduled job commits. Keep this test's records rollback-only.
+		with patch.object(frappe.db, "commit"):
+			for run in range(2):
+				update_delayed_tasks()
+				for task, expected, native in tasks:
+					with self.subTest(task=task.name, run=run):
+						task.reload()
+						self.assertEqual(task.task_status, expected)
+						self.assertEqual(task.status, native)
 
 
 class TestTask(BuildSuiteTestCase):
