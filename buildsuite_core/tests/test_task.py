@@ -79,6 +79,17 @@ class TestTask(BuildSuiteTestCase):
 		self.assertEqual(t.task_status, "In Delay")
 		self.assertEqual(t.status, "Working")
 
+	def test_undated_in_delay_status_treats_null_progress_as_zero(self):
+		p = self._make_project(company=self.company)
+		t = self._make_task(p.name, task_status="In Delay")
+		frappe.db.set_value("Task", t.name, "progress", None)
+		t.reload()
+
+		t.save(ignore_permissions=True)
+
+		self.assertEqual(t.task_status, "In Delay")
+		self.assertEqual(t.status, "Open")
+
 	def test_task_status_defaults_to_yet_to_start(self):
 		# TSK-006 — a new task with no explicit task_status defaults to
 		# "Yet To Start" (the field's own default, not just a value we happen
