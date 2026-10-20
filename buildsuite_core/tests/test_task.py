@@ -20,7 +20,7 @@ class TestDelayedTasks(BuildSuiteTestCase):
 		cases = [
 			(None, None, "Yet To Start", "Yet To Start", "Open"),
 			(None, tomorrow, "Yet To Start", "Yet To Start", "Open"),
-			(yesterday, None, "Yet To Start", "In Delay", "Overdue"),
+			(yesterday, None, "Yet To Start", "In Delay", "Open"),
 			(None, yesterday, "Yet To Start", "In Delay", "Overdue"),
 			(tomorrow, tomorrow, "Yet To Start", "Yet To Start", "Open"),
 			(today(), today(), "Yet To Start", "Yet To Start", "Open"),
@@ -68,6 +68,27 @@ class TestTask(BuildSuiteTestCase):
 		t.task_status = "In Progress"
 		t.save(ignore_permissions=True)
 		self.assertEqual(t.status, "Working")
+
+	def test_undated_in_delay_status_follows_progress(self):
+		p = self._make_project(company=self.company)
+		t = self._make_task(p.name, task_status="In Delay")
+		self.assertEqual(t.status, "Open")
+
+		t.progress = 25
+		t.save(ignore_permissions=True)
+		self.assertEqual(t.task_status, "In Delay")
+		self.assertEqual(t.status, "Working")
+
+	def test_undated_in_delay_status_treats_null_progress_as_zero(self):
+		p = self._make_project(company=self.company)
+		t = self._make_task(p.name, task_status="In Delay")
+		frappe.db.set_value("Task", t.name, "progress", None)
+		t.reload()
+
+		t.save(ignore_permissions=True)
+
+		self.assertEqual(t.task_status, "In Delay")
+		self.assertEqual(t.status, "Open")
 
 	def test_task_status_defaults_to_yet_to_start(self):
 		# TSK-006 — a new task with no explicit task_status defaults to
