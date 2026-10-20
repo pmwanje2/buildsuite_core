@@ -101,6 +101,27 @@ class TestTemplateTaskStatus(unittest.TestCase):
 			self.assertIn(["is_template", "=", 0], filters)
 
 
+class TestTemplatePredecessorGate(unittest.TestCase):
+	def test_predecessor_gate_never_rewrites_a_template(self):
+		# Review: a template left at task_status In Delay with an open predecessor
+		# must keep native status Template through the last Task validate hook.
+		task = _load_task_module()
+		schedule = types.ModuleType("buildsuite_core.api.schedule")
+		schedule.incomplete_fs_predecessor = lambda *args, **kwargs: "TASK-PRED"
+		doc = _template_task(exp_end_date=None)
+		doc.task_status = "In Delay"
+		doc.name = "TASK-TPL"
+		doc.depends_on = []
+		with patch.dict(sys.modules, {
+			"buildsuite_core": types.ModuleType("buildsuite_core"),
+			"buildsuite_core.api": types.ModuleType("buildsuite_core.api"),
+			"buildsuite_core.api.schedule": schedule,
+		}):
+			task.enforce_predecessor_gate(doc)
+		self.assertEqual(doc.status, "Template")
+		self.assertEqual(doc.task_status, "In Delay")
+
+
 class TestRestoreTemplateTaskStatusPatch(unittest.TestCase):
 	def test_patch_is_registered(self):
 		text = (ROOT / "buildsuite_core" / "patches.txt").read_text(encoding="utf-8")
@@ -114,18 +135,27 @@ class TestRestoreTemplateTaskStatusPatch(unittest.TestCase):
 
 		module.execute()
 
-		self.assertEqual(
-			frappe.get_all.call_args.kwargs["filters"],
-			{"is_template": 1, "status": ["!=", "Template"]},
-		)
+		self.assertEqual(frappe.get_all.call_args.kwargs["filters"], {"is_template": 1})
 		self.assertEqual(frappe.get_all.call_args.kwargs["pluck"], "name")
 		self.assertEqual(
 			frappe.db.set_value.call_args_list,
 			[
-				call("Task", "TASK-TPL-A", "status", "Template", update_modified=False),
-				call("Task", "TASK-TPL-B", "status", "Template", update_modified=False),
+				call("Task", "TASK-TPL-A", {"status": "Template", "task_status": "Yet To Start"}, update_modified=False),
+				call("Task", "TASK-TPL-B", {"status": "Template", "task_status": "Yet To Start"}, update_modified=False),
 			],
 		)
+
+	def test_patch_selects_templates_with_stale_status_or_task_status(self):
+		frappe = types.ModuleType("frappe")
+		frappe.get_all = Mock(return_value=[])
+		frappe.db = Mock()
+		module = _load_restore_patch(frappe)
+		module.execute()
+		module.execute()
+		self.assertEqual(frappe.get_all.call_args.kwargs["or_filters"],
+			{"status": ["!=", "Template"], "task_status": ["!=", "Yet To Start"]})
+		self.assertEqual(frappe.get_all.call_args.kwargs["filters"], {"is_template": 1})
+		frappe.db.set_value.assert_not_called()
 
 
 if __name__ == "__main__":
