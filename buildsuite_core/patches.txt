@@ -89,3 +89,4 @@ buildsuite_core.patches.backfill_petty_cash_paid_on # 2026-11-17 Petty Cash Requ
 buildsuite_core.patches.grant_hr_manager_attendance_registers # 2026-11-17 HR Manager may create + delete Labour / Overtime Attendance Registers (adds those two flags to its rule only)
 buildsuite_core.patches.add_po_site_contact_to_print_format # 2026-11-18 Purchase Order print: the optional site contact (name + mobile) under Deliver to project (only if the format was never edited)
 buildsuite_core.patches.fix_undated_overdue_tasks # 2026-10-20 #4608 W4-D
+buildsuite_core.patches.restore_template_task_status # 2026-10-20 #4655 W6 #50
