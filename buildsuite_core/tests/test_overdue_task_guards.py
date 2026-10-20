@@ -55,6 +55,7 @@ class TestTaskStatusGuard(unittest.TestCase):
 					exp_start_date=None,
 					status=None,
 					get_doc_before_save=lambda: None,
+					get=lambda key, default=None: None,
 				)
 				function(doc)
 				self.assertEqual(doc.status, "Open")
