@@ -212,7 +212,10 @@ def update_task_status(doc, method=None):
 		doc.status = "Working"
 
 	elif doc.task_status == "In Delay":
-		doc.status = "Overdue"
+		if doc.exp_end_date and getdate(doc.exp_end_date) < current_date:
+			doc.status = "Overdue"
+		else:
+			doc.status = "Working" if doc.progress > 0 else "Open"
 
 	elif doc.task_status == "Yet To Start":
 		doc.status = "Open"
@@ -251,7 +254,10 @@ def update_task_status_insert(doc, method=None):
 		doc.status = "Working"
 
 	elif doc.task_status == "In Delay":
-		doc.status = "Overdue"
+		if doc.exp_end_date and getdate(doc.exp_end_date) < current_date:
+			doc.status = "Overdue"
+		else:
+			doc.status = "Working" if doc.progress > 0 else "Open"
 
 	elif doc.task_status == "Yet To Start":
 		doc.status = "Open"
