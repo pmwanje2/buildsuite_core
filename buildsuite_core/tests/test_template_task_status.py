@@ -145,6 +145,39 @@ class TestRestoreTemplateTaskStatusPatch(unittest.TestCase):
 			],
 		)
 
+	def test_patch_repairs_once_and_second_run_is_a_no_op(self):
+		rows = {
+			"TASK-TPL-A": {"is_template": 1, "status": "Overdue", "task_status": "In Delay"},
+			"TASK-TPL-B": {"is_template": 1, "status": "Template", "task_status": "Yet To Start"},
+			"TASK-REAL": {"is_template": 0, "status": "Overdue", "task_status": "In Delay"},
+		}
+
+		def get_all(doctype, filters=None, or_filters=None, pluck=None):
+			assert doctype == "Task" and pluck == "name"
+			out = []
+			for name, row in rows.items():
+				if any(row[key] != value for key, value in (filters or {}).items()):
+					continue
+				if or_filters and not any(row[key] != cond[1] for key, cond in or_filters.items()):
+					continue
+				out.append(name)
+			return out
+
+		def set_value(doctype, name, values, update_modified=True):
+			assert update_modified is False
+			rows[name].update(values)
+
+		frappe = types.ModuleType("frappe")
+		frappe.get_all = get_all
+		frappe.db = types.SimpleNamespace(set_value=Mock(side_effect=set_value))
+		module = _load_restore_patch(frappe)
+		module.execute()
+		self.assertEqual(frappe.db.set_value.call_count, 1)
+		self.assertEqual(rows["TASK-TPL-A"], {"is_template": 1, "status": "Template", "task_status": "Yet To Start"})
+		self.assertEqual(rows["TASK-REAL"]["status"], "Overdue")
+		module.execute()
+		self.assertEqual(frappe.db.set_value.call_count, 1)
+
 	def test_patch_selects_templates_with_stale_status_or_task_status(self):
 		frappe = types.ModuleType("frappe")
 		frappe.get_all = Mock(return_value=[])
