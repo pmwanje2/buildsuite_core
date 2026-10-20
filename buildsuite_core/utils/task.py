@@ -482,6 +482,8 @@ def enforce_predecessor_gate(doc, method=None):
 	already carries the behind/blocked signal). An explicit move to In Progress or
 	Completed is rejected outright.
 	"""
+	if doc.get("is_template"):
+		return
 	status = doc.task_status
 	if not status or status in ("Yet To Start", "Blocked"):
 		return

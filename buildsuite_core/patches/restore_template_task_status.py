@@ -13,7 +13,10 @@ import frappe
 def execute():
 	for name in frappe.get_all(
 		"Task",
-		filters={"is_template": 1, "status": ["!=", "Template"]},
+		filters={"is_template": 1},
+		or_filters={"status": ["!=", "Template"], "task_status": ["!=", "Yet To Start"]},
 		pluck="name",
 	):
-		frappe.db.set_value("Task", name, "status", "Template", update_modified=False)
+		frappe.db.set_value(
+			"Task", name, {"status": "Template", "task_status": "Yet To Start"}, update_modified=False
+		)
