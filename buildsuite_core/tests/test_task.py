@@ -50,6 +50,83 @@ class TestDelayedTasks(BuildSuiteTestCase):
 
 
 class TestTask(BuildSuiteTestCase):
+	def test_buildsuite_task_override_marks_moved_successors_and_preserves_permissions(self):
+		p = self._make_project(company=self.company)
+		a = frappe.get_doc(
+			{
+				"doctype": "Task",
+				"project": p.name,
+				"subject": f"A {self._n}",
+				"exp_start_date": "2026-01-01",
+				"exp_end_date": "2026-01-10",
+			}
+		).insert(ignore_permissions=True)
+		b = frappe.get_doc(
+			{
+				"doctype": "Task",
+				"project": p.name,
+				"subject": f"B {self._n}",
+				"exp_start_date": "2026-01-08",
+				"exp_end_date": "2026-01-18",
+			}
+		).insert(ignore_permissions=True)
+		b.append("depends_on", {"task": a.name, "dependency_type": "FS", "lag_days": 0})
+		b.save(ignore_permissions=True)
+
+		from buildsuite_core.api import schedule_engine as eng
+
+		a.exp_end_date = "2026-01-20"
+		a.flags.ignore_permissions = True
+		with patch.object(eng.frappe, "get_doc", return_value=b) as get_doc:
+			with patch.object(b, "save") as save:
+				a.reschedule_dependent_tasks()
+
+		get_doc.assert_called_once_with("Task", b.name)
+		self.assertTrue(b.flags.rescheduled)
+		self.assertTrue(b.flags.ignore_recursion_check)
+		save.assert_called_once_with(ignore_permissions=True)
+
+	def test_buildsuite_task_override_allows_rescheduled_child_past_parent_end(self):
+		p = self._make_project(company=self.company)
+		parent = frappe.get_doc(
+			{
+				"doctype": "Task",
+				"project": p.name,
+				"subject": f"Parent {self._n}",
+				"exp_start_date": "2026-01-01",
+				"exp_end_date": "2026-01-15",
+				"is_group": 1,
+			}
+		).insert(ignore_permissions=True)
+		a = frappe.get_doc(
+			{
+				"doctype": "Task",
+				"project": p.name,
+				"subject": f"A {self._n}",
+				"exp_start_date": "2026-01-01",
+				"exp_end_date": "2026-01-10",
+			}
+		).insert(ignore_permissions=True)
+		b = frappe.get_doc(
+			{
+				"doctype": "Task",
+				"project": p.name,
+				"parent_task": parent.name,
+				"subject": f"B {self._n}",
+				"exp_start_date": "2026-01-08",
+				"exp_end_date": "2026-01-12",
+			}
+		).insert(ignore_permissions=True)
+		b.append("depends_on", {"task": a.name, "dependency_type": "FS", "lag_days": 0})
+		b.save(ignore_permissions=True)
+
+		a.exp_end_date = "2026-01-20"
+		a.save(ignore_permissions=True)
+
+		b.reload()
+		self.assertEqual(str(b.exp_start_date)[:10], "2026-01-20")
+		self.assertEqual(str(b.exp_end_date)[:10], "2026-01-24")
+
 	def test_buildsuite_task_reschedule_override_honours_skip_flags(self):
 		p = self._make_project(company=self.company)
 		for flag in ("ignore_reschedule", "in_schedule_cascade"):

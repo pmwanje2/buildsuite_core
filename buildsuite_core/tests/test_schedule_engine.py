@@ -26,6 +26,41 @@ def _e(pred, succ, type="FS", lag=0):
 
 
 class TestScheduleEngine(UnitTestCase):
+	def test_cascade_moves_only_native_reschedulable_statuses(self):
+		tasks = {
+			"A": _t("A", start=date(2026, 1, 1), end=date(2026, 1, 10)),
+			"open": _t("open", start=date(2026, 1, 1), end=date(2026, 1, 5), status="Open"),
+			"working": _t("working", start=date(2026, 1, 1), end=date(2026, 1, 5), status="Working"),
+			"overdue": _t("overdue", start=date(2026, 1, 1), end=date(2026, 1, 5), status="Overdue"),
+			"completed": _t("completed", start=date(2026, 1, 1), end=date(2026, 1, 5), status="Completed"),
+			"cancelled": _t("cancelled", start=date(2026, 1, 1), end=date(2026, 1, 5), status="Cancelled"),
+			"template": _t("template", start=date(2026, 1, 1), end=date(2026, 1, 5), status="Template"),
+		}
+		moves = eng.compute_cascade(
+			"A",
+			tasks,
+			[_e("A", name) for name in tasks if name != "A"],
+			{"start": date(2026, 1, 1), "end": date(2026, 1, 20)},
+		)
+		self.assertEqual(
+			{move["task"] for move in moves},
+			{"open", "working", "overdue"},
+		)
+		self.assertTrue(all(eng._is_reschedulable_status(tasks[move["task"]]["status"]) for move in moves))
+
+	def test_cascade_ss_uses_start_only_predecessor(self):
+		tasks = {
+			"A": _t("A", start=date(2026, 1, 1), end=None),
+			"B": _t("B", start=date(2026, 1, 2), end=date(2026, 1, 6)),
+		}
+		moves = eng.compute_cascade(
+			"A", tasks, [_e("A", "B", type="SS", lag=5)],
+			{"start": date(2026, 1, 10), "end": None},
+		)
+		self.assertEqual(len(moves), 1)
+		self.assertEqual(moves[0]["new_start"], "2026-01-15")
+		self.assertEqual(moves[0]["new_end"], "2026-01-19")
+
 	def test_negative_fs_lag_allows_successor_before_predecessor_end(self):
 		pred = _t("A", start=date(2026, 1, 1), end=date(2026, 1, 10))
 		succ = _t("B", start=date(2026, 1, 8), end=date(2026, 1, 18))
