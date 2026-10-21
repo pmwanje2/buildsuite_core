@@ -9,6 +9,7 @@ import frappe
 from frappe.utils import add_days, today
 
 from buildsuite_core.tests.base import BuildSuiteTestCase
+from buildsuite_core.overrides.task import BuildSuiteTask
 from buildsuite_core.utils.task import update_delayed_tasks
 
 
@@ -49,6 +50,42 @@ class TestDelayedTasks(BuildSuiteTestCase):
 
 
 class TestTask(BuildSuiteTestCase):
+	def test_buildsuite_task_reschedule_override_honours_skip_flags(self):
+		p = self._make_project(company=self.company)
+		for flag in ("ignore_reschedule", "in_schedule_cascade"):
+			a = frappe.get_doc(
+				{
+					"doctype": "Task",
+					"project": p.name,
+					"subject": f"A {self._n} {flag}",
+					"exp_start_date": "2026-01-01",
+					"exp_end_date": "2026-01-10",
+				}
+			).insert(ignore_permissions=True)
+			b = frappe.get_doc(
+				{
+					"doctype": "Task",
+					"project": p.name,
+					"subject": f"B {self._n} {flag}",
+					"exp_start_date": "2026-01-08",
+					"exp_end_date": "2026-01-18",
+				}
+			).insert(ignore_permissions=True)
+			b.append("depends_on", {"task": a.name, "dependency_type": "FS", "lag_days": -2})
+			b.save(ignore_permissions=True)
+			try:
+				setattr(frappe.flags, flag, True)
+				a.exp_end_date = "2026-01-20"
+				a.save(ignore_permissions=True)
+			finally:
+				setattr(frappe.flags, flag, False)
+			b.reload()
+			self.assertEqual(str(b.exp_start_date)[:10], "2026-01-08")
+			self.assertEqual(str(b.exp_end_date)[:10], "2026-01-18")
+
+	def test_buildsuite_task_override_is_the_task_controller(self):
+		self.assertTrue(issubclass(BuildSuiteTask, object))
+		self.assertIn("reschedule_dependent_tasks", BuildSuiteTask.__dict__)
 	def _make_wp(self, project, code_suffix=""):
 		return frappe.get_doc(
 			{
