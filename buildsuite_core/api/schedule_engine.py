@@ -20,6 +20,11 @@ from frappe import _
 from frappe.utils import getdate
 
 VALID_DEP_TYPES = ("FS", "SS", "FF")
+RESCHEDULABLE_STATUSES = ("Open", "Working", "Overdue")
+
+
+def _is_reschedulable_status(status):
+	return status in RESCHEDULABLE_STATUSES
 
 
 # --- pure date helpers (mirror _scheduleAddDays / _scheduleDiffDays) -----------
@@ -206,6 +211,9 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None):
 	for tid in order:
 		if tid == root_id:
 			continue
+		task = tasks_by_id.get(tid)
+		if not task or not _is_reschedulable_status(task.get("status")):
+			continue
 		cur = working.get(tid)
 		if not cur:
 			continue
@@ -224,9 +232,14 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None):
 			if pd is None:
 				t = tasks_by_id.get(dep["predecessor"])
 				pd = {"start": t.get("start"), "end": t.get("end"), "type": t.get("type")} if t else None
-			if not pd or not pd.get("end"):
+			if not pd:
 				continue
 			pred = {"start": pd.get("start"), "end": pd.get("end"), "type": pd.get("type")}
+			if dep["type"] == "SS" and pred.get("type") != "Milestone":
+				if not pd.get("start"):
+					continue
+			elif not pd.get("end"):
+				continue
 			succ = {"start": cur["start"], "end": cur["end"], "type": cur["type"]}
 			earliest = _earliest_start_for_edge(pred, succ, dep, cur["dur"])
 			if not earliest:
@@ -312,7 +325,7 @@ def _load_graph(project):
 	return tasks_by_id, edges
 
 
-def _apply_moves(root, moves, root_override=None):
+def _apply_moves(root, moves, root_override=None, native_reschedule=False):
 	frappe.flags.in_schedule_cascade = True
 	try:
 		if root_override:
@@ -329,7 +342,12 @@ def _apply_moves(root, moves, root_override=None):
 			else:
 				t.exp_start_date = m["new_start"]
 				t.exp_end_date = m["new_end"]
-			t.save()
+			if native_reschedule:
+				t.flags.ignore_recursion_check = True
+				t.flags.rescheduled = True
+				t.save(ignore_permissions=root.flags.ignore_permissions)
+			else:
+				t.save()
 	finally:
 		frappe.flags.in_schedule_cascade = False
 

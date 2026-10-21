@@ -46,4 +46,4 @@ class BuildSuiteTask(_ERPNextTask):
 		)
 		if moves is None:
 			frappe.throw("Cycle detected in the downstream schedule — cascade aborted.")
-		_apply_moves(self, moves)
+		_apply_moves(self, moves, native_reschedule=True)
