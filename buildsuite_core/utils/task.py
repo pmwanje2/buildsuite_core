@@ -164,6 +164,8 @@ from frappe.utils import getdate, today
 
 
 def update_task_status(doc, method=None):
+	if doc.get("is_template"):
+		return
 	current_date = getdate(today())
 	old_doc = doc.get_doc_before_save()
 
@@ -225,6 +227,8 @@ def update_task_status(doc, method=None):
 
 
 def update_task_status_insert(doc, method=None):
+	if doc.get("is_template"):
+		return
 	current_date = getdate(today())
 
 	# Set task status to In Delay automatically. Blocked is an explicit manual
@@ -367,6 +371,7 @@ def update_delayed_tasks():
 			["exp_end_date", "is", "set"],
 			["exp_end_date", "<", current_date],
 			["task_status", "not in", ["Completed", "In Delay", "Blocked"]],
+			["is_template", "=", 0],
 		],
 		fields=["name"],
 	)
@@ -384,6 +389,7 @@ def update_delayed_tasks():
 			["exp_start_date", "is", "set"],
 			["exp_start_date", "<", current_date],
 			["task_status", "not in", ["Completed", "In Progress", "In Delay", "Blocked"]],
+			["is_template", "=", 0],
 		],
 		fields=["name"],
 	)
@@ -476,6 +482,8 @@ def enforce_predecessor_gate(doc, method=None):
 	already carries the behind/blocked signal). An explicit move to In Progress or
 	Completed is rejected outright.
 	"""
+	if doc.get("is_template"):
+		return
 	status = doc.task_status
 	if not status or status in ("Yet To Start", "Blocked"):
 		return
