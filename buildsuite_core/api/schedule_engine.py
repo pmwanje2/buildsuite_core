@@ -275,7 +275,7 @@ def _load_graph(project):
 	tasks = frappe.get_all(
 		"Task",
 		filters={"project": project},
-		fields=["name", "type", "exp_start_date", "exp_end_date", "status"],
+		fields=["name", "type", "exp_start_date", "exp_end_date", "status", "parent_task"],
 		limit_page_length=0,
 	)
 	tasks_by_id = {}
@@ -286,6 +286,7 @@ def _load_graph(project):
 			"start": getdate(t.exp_start_date) if t.exp_start_date else None,
 			"end": getdate(t.exp_end_date) if t.exp_end_date else None,
 			"status": t.status,
+			"parent_task": t.parent_task,
 		}
 	names = list(tasks_by_id.keys())
 	edges = []
@@ -296,8 +297,10 @@ def _load_graph(project):
 			fields=["parent", "task", "dependency_type", "lag_days"],
 		)
 		for r in rows:
-			# Only edges whose predecessor is also in this project's set.
-			if r.task in tasks_by_id:
+			# Only edges whose predecessor is also in this project's set. ERPNext
+			# mirrors the child -> parent tree relation into depends_on; that is
+			# not a schedule dependency.
+			if r.task in tasks_by_id and tasks_by_id[r.task].get("parent_task") != r.parent:
 				edges.append(
 					{
 						"predecessor": r.task,
@@ -307,6 +310,28 @@ def _load_graph(project):
 					}
 				)
 	return tasks_by_id, edges
+
+
+def _apply_moves(root, moves, root_override=None):
+	frappe.flags.in_schedule_cascade = True
+	try:
+		if root_override:
+			if root_override.get("start") is not None:
+				root.exp_start_date = root_override["start"]
+			if root_override.get("end") is not None:
+				root.exp_end_date = root_override["end"]
+			root.save()
+		for m in moves:
+			t = frappe.get_doc("Task", m["task"])
+			if m.get("is_milestone"):
+				# normalize_milestone_task collapses start to end on save.
+				t.exp_end_date = m["new_end"]
+			else:
+				t.exp_start_date = m["new_start"]
+				t.exp_end_date = m["new_end"]
+			t.save()
+	finally:
+		frappe.flags.in_schedule_cascade = False
 
 
 def _set_conflict(name, conflict, reason):
@@ -370,9 +395,18 @@ def reschedule_downstream(task: str, new_start: str | None = None, new_end: str 
 
 	root_override = None
 	if new_start or new_end:
+		old_start = getdate(root.exp_start_date) if root.exp_start_date else None
+		old_end = getdate(root.exp_end_date) if root.exp_end_date else None
+		duration = _diff_days(old_start, old_end)
+		start = getdate(new_start) if new_start else old_start
+		end = getdate(new_end) if new_end else old_end
+		if new_start and not new_end and start and old_start and old_end:
+			end = _add_days(start, duration)
+		elif new_end and not new_start and end and old_start and old_end:
+			start = _add_days(end, -duration)
 		root_override = {
-			"start": getdate(new_start) if new_start else None,
-			"end": getdate(new_end) if new_end else None,
+			"start": start,
+			"end": end,
 		}
 
 	moves = compute_cascade(task, tasks_by_id, edges, root_override)
@@ -390,25 +424,7 @@ def reschedule_downstream(task: str, new_start: str | None = None, new_end: str 
 
 		capture_snapshot(root.project, "Undo", trigger="reschedule_downstream", root_task=task)
 
-	frappe.flags.in_schedule_cascade = True
-	try:
-		if root_override:
-			if root_override.get("start") is not None:
-				root.exp_start_date = root_override["start"]
-			if root_override.get("end") is not None:
-				root.exp_end_date = root_override["end"]
-			root.save()
-		for m in moves:
-			t = frappe.get_doc("Task", m["task"])
-			if m.get("is_milestone"):
-				# normalize_milestone_task collapses start to end on save.
-				t.exp_end_date = m["new_end"]
-			else:
-				t.exp_start_date = m["new_start"]
-				t.exp_end_date = m["new_end"]
-			t.save()
-	finally:
-		frappe.flags.in_schedule_cascade = False
+	_apply_moves(root, moves, root_override)
 
 	recompute_schedule_conflicts(task)
 	return {"moves": moves}
