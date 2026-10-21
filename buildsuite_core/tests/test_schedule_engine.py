@@ -8,6 +8,7 @@ server's authoritative commit never disagree.
 """
 
 from datetime import date
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import UnitTestCase
@@ -25,6 +26,82 @@ def _e(pred, succ, type="FS", lag=0):
 
 
 class TestScheduleEngine(UnitTestCase):
+	def test_negative_fs_lag_allows_successor_before_predecessor_end(self):
+		pred = _t("A", start=date(2026, 1, 1), end=date(2026, 1, 10))
+		succ = _t("B", start=date(2026, 1, 8), end=date(2026, 1, 18))
+		self.assertEqual(
+			eng._earliest_start_for_edge(pred, succ, _e("A", "B", type="FS", lag=-2)),
+			date(2026, 1, 8),
+		)
+
+	def test_ss_uses_predecessor_start_and_ignores_end_only_change(self):
+		tasks = {
+			"A": _t("A", start=date(2026, 1, 1), end=date(2026, 1, 10)),
+			"B": _t("B", start=date(2026, 1, 6), end=date(2026, 1, 16)),
+		}
+		edges = [_e("A", "B", type="SS", lag=5)]
+		self.assertEqual(eng._compute_earliest_start("B", tasks, edges)[0], date(2026, 1, 6))
+		self.assertEqual(
+			eng.compute_cascade(
+				"A", tasks, edges, {"start": date(2026, 1, 1), "end": date(2026, 1, 20)}
+			),
+			[],
+		)
+
+	def test_ff_tracks_predecessor_end_and_preserves_duration(self):
+		tasks = {
+			"A": _t("A", start=date(2026, 1, 1), end=date(2026, 1, 20)),
+			"B": _t("B", start=date(2026, 1, 3), end=date(2026, 1, 8)),
+		}
+		moves = eng.compute_cascade(
+			"A", tasks, [_e("A", "B", type="FF", lag=2)],
+			{"start": date(2026, 1, 1), "end": date(2026, 1, 25)},
+		)
+		self.assertEqual(len(moves), 1)
+		self.assertEqual(moves[0]["new_start"], "2026-01-22")
+		self.assertEqual(moves[0]["new_end"], "2026-01-27")
+
+	def test_five_day_slip_moves_relationship_successors_but_not_summary_tasks(self):
+		tasks = {
+			"2.1": _t("2.1", start=date(2026, 1, 1), end=date(2026, 1, 10)),
+			"1.0": _t("1.0", type="Activity", start=date(2026, 1, 1), end=date(2026, 1, 10)),
+			"2.0": _t("2.0", type="Activity", start=date(2026, 1, 1), end=date(2026, 1, 10)),
+			"3.0": _t("3.0", type="Activity", start=date(2026, 1, 1), end=date(2026, 1, 10)),
+		}
+		for task_id in ("2.2", "2.3", "2.4", "3.1", "3.2", "3.3", "3.4", "4.1", "4.2", "4.3", "4.4"):
+			tasks[task_id] = _t(task_id, start=date(2026, 1, 10), end=date(2026, 1, 12))
+		edges = [_e("2.1", task_id) for task_id in tasks if task_id not in {"2.1", "1.0", "2.0", "3.0"}]
+		moves = eng.compute_cascade(
+			"2.1", tasks, edges, {"start": date(2026, 1, 6), "end": date(2026, 1, 15)}
+		)
+		self.assertEqual({m["task"] for m in moves}, set(tasks) - {"2.1", "1.0", "2.0", "3.0"})
+		self.assertEqual(len(moves), 11)
+		self.assertIn("2.2", {m["task"] for m in moves})
+		self.assertIn("3.1", {m["task"] for m in moves})
+		self.assertTrue(all(m["new_start"] == "2026-01-15" for m in moves))
+
+	def test_load_graph_drops_automatic_child_to_parent_edge(self):
+		class Row:
+			def __init__(self, **values):
+				self.__dict__.update(values)
+
+		def get_all(doctype, **kwargs):
+			if doctype == "Task":
+				return [
+					Row(name="1.0", type="Activity", exp_start_date="2026-01-01", exp_end_date="2026-01-10", status="Open", parent_task=None),
+					Row(name="1.3", type="Activity", exp_start_date="2026-01-02", exp_end_date="2026-01-09", status="Open", parent_task="1.0"),
+					Row(name="2.1", type="Activity", exp_start_date="2026-01-01", exp_end_date="2026-01-10", status="Open", parent_task=None),
+					Row(name="2.2", type="Activity", exp_start_date="2026-01-10", exp_end_date="2026-01-12", status="Open", parent_task=None),
+				]
+			return [
+				Row(parent="1.0", task="1.3", dependency_type="FS", lag_days=0),
+				Row(parent="2.2", task="2.1", dependency_type="FS", lag_days=0),
+			]
+
+		with patch.object(eng.frappe, "get_all", side_effect=get_all):
+			_, edges = eng._load_graph("PROJ-1")
+		self.assertEqual(edges, [{"predecessor": "2.1", "successor": "2.2", "type": "FS", "lag": 0}])
+
 	def test_fs_conflict_flagged(self):
 		tasks = {
 			"A": _t("A", start=date(2026, 1, 1), end=date(2026, 1, 10)),
@@ -244,6 +321,37 @@ class TestScheduleEngineIntegration(BuildSuiteTestCase):
 		b.reload()
 		self.assertEqual(str(b.exp_start_date)[:10], "2026-01-20")
 		self.assertFalse(b.schedule_conflict)
+
+	def test_status_only_save_does_not_reschedule_fs_or_ss_dependents(self):
+		p = self._make_project(company=self.company)
+		a = self._task(p.name, f"A {self._n}", "2026-01-01", "2026-01-10")
+		fs = self._task(p.name, f"FS {self._n}", "2026-01-08", "2026-01-18")
+		ss = self._task(p.name, f"SS {self._n}", "2026-01-06", "2026-01-16")
+		fs.append("depends_on", {"task": a.name, "dependency_type": "FS", "lag_days": -2})
+		fs.save(ignore_permissions=True)
+		ss.append("depends_on", {"task": a.name, "dependency_type": "SS", "lag_days": 5})
+		ss.save(ignore_permissions=True)
+
+		a.status = "Working"
+		a.save(ignore_permissions=True)
+		fs.reload()
+		ss.reload()
+		self.assertEqual(str(fs.exp_start_date)[:10], "2026-01-08")
+		self.assertEqual(str(fs.exp_end_date)[:10], "2026-01-18")
+		self.assertEqual(str(ss.exp_start_date)[:10], "2026-01-06")
+		self.assertEqual(str(ss.exp_end_date)[:10], "2026-01-16")
+
+	def test_start_only_preview_keeps_duration_and_moves_dependents(self):
+		p = self._make_project(company=self.company)
+		a = self._task(p.name, f"A {self._n}", "2026-01-01", "2026-01-10")
+		b = self._task(p.name, f"B {self._n}", "2026-01-11", "2026-01-21")
+		b.append("depends_on", {"task": a.name, "dependency_type": "FS", "lag_days": 0})
+		b.save(ignore_permissions=True)
+
+		preview = eng.reschedule_downstream(a.name, new_start="2026-01-06", dry_run=1)
+		self.assertEqual([m["task"] for m in preview["moves"]], [b.name])
+		self.assertEqual(preview["moves"][0]["new_start"], "2026-01-15")
+		self.assertEqual(preview["moves"][0]["new_end"], "2026-01-25")
 
 	def test_ff_dependency_recompute(self):
 		# SCH-010 — an FF (Finish-to-Finish) dependency ties the successor's END
