@@ -179,11 +179,13 @@ def compute_conflicts(root_id, tasks_by_id, edges):
 	return result
 
 
-def compute_cascade(root_id, tasks_by_id, edges, root_override=None):
-	"""CASCADE: duration-preserving forward shifts in topological order. Never
-	pulls earlier (slack preserved). `root_override` = {"start","end"} sets the
-	root's working dates (the user's move) without persisting. Returns moves[] or
-	None on a cycle."""
+def compute_cascade(root_id, tasks_by_id, edges, root_override=None, asap=False):
+	"""CASCADE: duration-preserving relationship shifts in topological order.
+	Forward shifts preserve the existing behavior. With ``asap=True``, eligible
+	open/overdue tasks without an actual start may also pull back to their binding
+	earliest date. ``root_override`` sets the root's working dates (the user's
+	move) without persisting; when it is absent, ASAP also aligns the root against
+	its predecessors. Returns moves[] or None on a cycle."""
 	order, size = _topological_downstream(root_id, edges)
 	if len(order) != size:
 		return None  # cycle
@@ -205,14 +207,20 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None):
 			"dur": 0 if is_ms else _diff_days(start, end),
 			"is_ms": is_ms,
 			"type": t.get("type"),
+			"act_start_date": t.get("act_start_date"),
 		}
 
 	moves = []
 	for tid in order:
-		if tid == root_id:
+		if tid == root_id and not (asap and root_override is None):
 			continue
 		task = tasks_by_id.get(tid)
-		if not task or not _is_reschedulable_status(task.get("status")):
+		if not task:
+			continue
+		if tid == root_id:
+			if task.get("status") not in ("Open", "Overdue") or task.get("act_start_date"):
+				continue
+		elif not _is_reschedulable_status(task.get("status")):
 			continue
 		cur = working.get(tid)
 		if not cur:
@@ -251,7 +259,8 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None):
 		if not binding:
 			continue
 		anchor = cur["end"] if cur["is_ms"] else cur["start"]
-		if _diff_days(anchor, binding) > 0:
+		delta = _diff_days(anchor, binding)
+		if delta > 0:
 			if cur["is_ms"]:
 				moves.append(
 					{
@@ -275,6 +284,35 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None):
 						"new_start": _iso(binding),
 						"new_end": _iso(new_end),
 						"reason": binding_reason,
+						"is_milestone": False,
+					}
+				)
+				working[tid] = {**cur, "start": binding, "end": new_end}
+		elif asap and delta < 0 and task.get("status") in ("Open", "Overdue") and not task.get("act_start_date"):
+			if cur["is_ms"]:
+				moves.append(
+					{
+						"task": tid,
+						"old_start": None,
+						"old_end": _iso(cur["end"]),
+						"new_start": None,
+						"new_end": _iso(binding),
+						"reason": binding_reason,
+						"is_milestone": True,
+					}
+				)
+				working[tid] = {**cur, "end": binding}
+			else:
+				new_end = _add_days(binding, cur["dur"])
+				moves.append(
+					{
+						"task": tid,
+						"old_start": _iso(cur["start"]),
+						"old_end": _iso(cur["end"]),
+						"new_start": _iso(binding),
+						"new_end": _iso(new_end),
+						"reason": binding_reason,
+						"is_milestone": False,
 					}
 				)
 				working[tid] = {**cur, "start": binding, "end": new_end}
@@ -288,7 +326,15 @@ def _load_graph(project):
 	tasks = frappe.get_all(
 		"Task",
 		filters={"project": project},
-		fields=["name", "type", "exp_start_date", "exp_end_date", "status", "parent_task"],
+		fields=[
+			"name",
+			"type",
+			"exp_start_date",
+			"exp_end_date",
+			"act_start_date",
+			"status",
+			"parent_task",
+		],
 		limit_page_length=0,
 	)
 	tasks_by_id = {}
@@ -300,6 +346,7 @@ def _load_graph(project):
 			"end": getdate(t.exp_end_date) if t.exp_end_date else None,
 			"status": t.status,
 			"parent_task": t.parent_task,
+			"act_start_date": getdate(t.act_start_date) if getattr(t, "act_start_date", None) else None,
 		}
 	names = list(tasks_by_id.keys())
 	edges = []
@@ -335,9 +382,12 @@ def _apply_moves(root, moves, root_override=None, native_reschedule=False):
 				root.exp_end_date = root_override["end"]
 			root.save()
 		for m in moves:
+			if root_override and m.get("task") == getattr(root, "name", None):
+				continue
 			t = frappe.get_doc("Task", m["task"])
 			if m.get("is_milestone"):
 				# normalize_milestone_task collapses start to end on save.
+				t.exp_start_date = m["new_end"]
 				t.exp_end_date = m["new_end"]
 			else:
 				t.exp_start_date = m["new_start"]
@@ -395,9 +445,18 @@ def recompute_conflicts_on_update(doc, method=None):
 
 
 @frappe.whitelist()
-def reschedule_downstream(task: str, new_start: str | None = None, new_end: str | None = None, dry_run: int = 1):
+def reschedule_downstream(
+	task: str,
+	new_start: str | None = None,
+	new_end: str | None = None,
+	dry_run: int = 1,
+	asap: int = 0,
+	slip_days: int | None = None,
+):
 	"""Preview (dry_run=1) or commit (dry_run=0) a duration-preserving downstream
-	cascade after moving `task` to new_start/new_end. Returns {"moves": [...]}.
+	cascade after moving `task` to new_start/new_end or slipping it by slip_days.
+	With asap=1, eligible tasks may also be pulled back to their earliest
+	relationship-bound dates. Returns {"moves": [...]}.
 
 	Commit writes each affected task via doc.save(), so Task write permission is
 	enforced per task and the stage-sync / progress hooks still run; conflict
@@ -406,13 +465,26 @@ def reschedule_downstream(task: str, new_start: str | None = None, new_end: str 
 	dry_run = int(dry_run)
 	if not task:
 		frappe.throw(_("task is required"))
+	if slip_days is not None and (new_start or new_end):
+		frappe.throw(_("slip_days cannot be combined with new_start or new_end."))
 	root = frappe.get_doc("Task", task)
 	tasks_by_id, edges = _load_graph(root.project)
 	if task not in tasks_by_id:
 		frappe.throw(_("Task is not part of a project schedule."))
 
 	root_override = None
-	if new_start or new_end:
+	slip = None
+	if slip_days is not None:
+		slip = int(slip_days)
+		old_start = getdate(root.exp_start_date) if root.exp_start_date else None
+		old_end = getdate(root.exp_end_date) if root.exp_end_date else None
+		if old_start is None and old_end is None:
+			frappe.throw(_("slip_days requires the root task to have at least one expected date."))
+		root_override = {
+			"start": _add_days(old_start, slip),
+			"end": _add_days(old_end, slip),
+		}
+	elif new_start or new_end:
 		old_start = getdate(root.exp_start_date) if root.exp_start_date else None
 		old_end = getdate(root.exp_end_date) if root.exp_end_date else None
 		duration = _diff_days(old_start, old_end)
@@ -427,22 +499,42 @@ def reschedule_downstream(task: str, new_start: str | None = None, new_end: str 
 			"end": end,
 		}
 
-	moves = compute_cascade(task, tasks_by_id, edges, root_override)
+	moves = compute_cascade(task, tasks_by_id, edges, root_override, asap=bool(int(asap)))
 	if moves is None:
 		frappe.throw(_("Cycle detected in the downstream schedule — cascade aborted."))
+
+	root_changed = bool(
+		root_override
+		and (
+			root_override.get("start") != (getdate(root.exp_start_date) if root.exp_start_date else None)
+			or root_override.get("end") != (getdate(root.exp_end_date) if root.exp_end_date else None)
+		)
+	)
+	if root_changed and slip_days is not None:
+		root_move = {
+			"task": task,
+			"old_start": _iso(getdate(root.exp_start_date) if root.exp_start_date else None),
+			"old_end": _iso(getdate(root.exp_end_date) if root.exp_end_date else None),
+			"new_start": _iso(root_override.get("start")),
+			"new_end": _iso(root_override.get("end")),
+			"reason": f"slip {slip} days" if slip_days is not None else "root override",
+			"is_milestone": tasks_by_id[task].get("type") == "Milestone",
+		}
+		moves = [root_move, *moves]
 
 	if dry_run:
 		return {"moves": moves}
 
 	# A downstream cascade is a *group* action — capture an undo snapshot of the
 	# project schedule before mutating, so the whole shift can be reverted in one
-	# step. Skipped when nothing downstream moves (that's a single-task change).
+	# step. Explicit new_start/new_end-only changes stay single-task changes;
+	# slip and ASAP root alignment changes are represented in moves.
 	if moves:
 		from buildsuite_core.api.schedule_snapshot import capture_snapshot
 
 		capture_snapshot(root.project, "Undo", trigger="reschedule_downstream", root_task=task)
 
-	_apply_moves(root, moves, root_override)
+	_apply_moves(root, moves, root_override if root_changed else None)
 
 	recompute_schedule_conflicts(task)
 	return {"moves": moves}
