@@ -382,6 +382,8 @@ def _apply_moves(root, moves, root_override=None, native_reschedule=False):
 				root.exp_end_date = root_override["end"]
 			root.save()
 		for m in moves:
+			if root_override and m.get("task") == getattr(root, "name", None):
+				continue
 			t = frappe.get_doc("Task", m["task"])
 			if m.get("is_milestone"):
 				# normalize_milestone_task collapses start to end on save.
@@ -470,10 +472,13 @@ def reschedule_downstream(
 		frappe.throw(_("Task is not part of a project schedule."))
 
 	root_override = None
+	slip = None
 	if slip_days is not None:
 		slip = int(slip_days)
 		old_start = getdate(root.exp_start_date) if root.exp_start_date else None
 		old_end = getdate(root.exp_end_date) if root.exp_end_date else None
+		if old_start is None and old_end is None:
+			frappe.throw(_("slip_days requires the root task to have at least one expected date."))
 		root_override = {
 			"start": _add_days(old_start, slip),
 			"end": _add_days(old_end, slip),
@@ -497,18 +502,37 @@ def reschedule_downstream(
 	if moves is None:
 		frappe.throw(_("Cycle detected in the downstream schedule — cascade aborted."))
 
+	root_changed = bool(
+		root_override
+		and (
+			root_override.get("start") != (getdate(root.exp_start_date) if root.exp_start_date else None)
+			or root_override.get("end") != (getdate(root.exp_end_date) if root.exp_end_date else None)
+		)
+	)
+	if root_changed:
+		root_move = {
+			"task": task,
+			"old_start": _iso(getdate(root.exp_start_date) if root.exp_start_date else None),
+			"old_end": _iso(getdate(root.exp_end_date) if root.exp_end_date else None),
+			"new_start": _iso(root_override.get("start")),
+			"new_end": _iso(root_override.get("end")),
+			"reason": f"slip {slip} days" if slip_days is not None else "root override",
+			"is_milestone": tasks_by_id[task].get("type") == "Milestone",
+		}
+		moves = [root_move, *moves]
+
 	if dry_run:
 		return {"moves": moves}
 
 	# A downstream cascade is a *group* action — capture an undo snapshot of the
 	# project schedule before mutating, so the whole shift can be reverted in one
 	# step. Skipped when nothing downstream moves (that's a single-task change).
-	if moves:
+	if root_changed or moves:
 		from buildsuite_core.api.schedule_snapshot import capture_snapshot
 
 		capture_snapshot(root.project, "Undo", trigger="reschedule_downstream", root_task=task)
 
-	_apply_moves(root, moves, root_override)
+	_apply_moves(root, moves, root_override if root_changed else None)
 
 	recompute_schedule_conflicts(task)
 	return {"moves": moves}
