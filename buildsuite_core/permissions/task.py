@@ -14,7 +14,7 @@ Creator = Frappe's built-in `owner`. Assignee = Frappe-native assignment (`_assi
 
 import frappe
 
-from buildsuite_core.permissions.project import _is_project_member, _is_scoped
+from buildsuite_core.permissions.project import _is_project_member, _is_read_scoped, _is_scoped
 
 # Roles with unrestricted write/create/delete within their visible projects —
 # no own-scope restriction applies to them.
@@ -50,7 +50,7 @@ def _can_modify_task(doc, user):
 def get_task_permission_query(user):
 	if not user:
 		user = frappe.session.user
-	if not _is_scoped(user):
+	if not _is_read_scoped(user):
 		return ""
 
 	# A task is visible when its parent project is one the user is teamed on.
@@ -66,6 +66,8 @@ def has_task_permission(doc, ptype="read", user=None):
 	if not user:
 		user = frappe.session.user
 	if not _is_scoped(user):
+		return True
+	if ptype in ("read", "select", "report", "print", "export") and not _is_read_scoped(user):
 		return True
 
 	project = getattr(doc, "project", None)
