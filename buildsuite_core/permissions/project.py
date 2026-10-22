@@ -96,6 +96,11 @@ def _is_scoped(user):
 	visibility = project_visibility(user)
 	if visibility == ALL_PROJECTS:
 		return False
+	roles = set(frappe.get_roles(user))
+	company_roles = frappe.conf.get("project_company_roles")
+	if isinstance(company_roles, list) and all(isinstance(role, str) for role in company_roles):
+		if roles & set(company_roles):
+			return False
 	if visibility == UNTIL_TEAMED:
 		return _has_any_membership(user)
 	# Team projects only — and any value this code does not know, the safe side.
