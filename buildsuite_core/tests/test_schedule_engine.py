@@ -257,6 +257,47 @@ class TestScheduleEngine(UnitTestCase):
 		self.assertEqual({move["task"] for move in moves}, {"open", "overdue"})
 		self.assertTrue(all(move["is_milestone"] is False for move in moves))
 
+	def test_asap_root_alignment_uses_pull_eligibility_for_push_and_pull(self):
+		predecessor = _t("pred", start=date(2026, 3, 1), end=date(2026, 3, 20))
+
+		for status, act_start_date in (
+			("Working", None),
+			("Open", date(2026, 3, 2)),
+			("Overdue", date(2026, 3, 2)),
+		):
+			with self.subTest(status=status, act_start_date=act_start_date):
+				tasks = {
+					"pred": predecessor,
+					"root": _t(
+						"root",
+						start=date(2026, 3, 1),
+						end=date(2026, 3, 6),
+						status=status,
+						act_start_date=act_start_date,
+					),
+				}
+				self.assertEqual(
+					eng.compute_cascade("root", tasks, [_e("pred", "root")], asap=True),
+					[],
+				)
+
+		for status in ("Open", "Overdue"):
+			with self.subTest(status=status):
+				tasks = {
+					"pred": predecessor,
+					"root": _t(
+						"root",
+						start=date(2026, 4, 10),
+						end=date(2026, 4, 15),
+						status=status,
+					),
+				}
+				moves = eng.compute_cascade("root", tasks, [_e("pred", "root")], asap=True)
+				self.assertEqual(len(moves), 1)
+				self.assertEqual(moves[0]["task"], "root")
+				self.assertEqual(moves[0]["new_start"], "2026-03-20")
+				self.assertEqual(moves[0]["new_end"], "2026-03-25")
+
 	def test_every_move_declares_boolean_milestone_flag(self):
 		tasks = {
 			"pred": _t("pred", start=date(2026, 1, 1), end=date(2026, 1, 10)),
