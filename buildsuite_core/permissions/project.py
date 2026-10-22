@@ -66,6 +66,10 @@ def _is_scoped(user):
 	roles = set(frappe.get_roles(user))
 	if roles & EXEMPT_ROLES:
 		return False
+	company_roles = frappe.conf.get("project_company_roles")
+	if isinstance(company_roles, list) and all(isinstance(role, str) for role in company_roles):
+		if roles & set(company_roles):
+			return False
 	if roles & FLIP_ROLES:
 		return _has_any_membership(user)
 	# TEAM_ONLY roles, and anyone without a BuildSuite role, are scoped.
