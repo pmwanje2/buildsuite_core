@@ -23,16 +23,6 @@ VALID_DEP_TYPES = ("FS", "SS", "FF")
 RESCHEDULABLE_STATUSES = ("Open", "Working", "Overdue")
 
 
-def _coerce_asap(value):
-	if isinstance(value, bool):
-		return value
-	if isinstance(value, int) and value in (0, 1):
-		return bool(value)
-	if isinstance(value, str) and value in ("0", "1"):
-		return value == "1"
-	frappe.throw(_("asap must be true, false, 0, 1, '0', or '1'."))
-
-
 def _is_reschedulable_status(status):
 	return status in RESCHEDULABLE_STATUSES
 
@@ -509,7 +499,7 @@ def reschedule_downstream(
 			"end": end,
 		}
 
-	moves = compute_cascade(task, tasks_by_id, edges, root_override, asap=_coerce_asap(asap))
+	moves = compute_cascade(task, tasks_by_id, edges, root_override, asap=bool(asap))
 	if moves is None:
 		frappe.throw(_("Cycle detected in the downstream schedule — cascade aborted."))
 
