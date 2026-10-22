@@ -8,6 +8,7 @@ server's authoritative commit never disagree.
 """
 
 from datetime import date
+import inspect
 from unittest.mock import patch
 
 import frappe
@@ -33,6 +34,33 @@ def _e(pred, succ, type="FS", lag=0):
 
 
 class TestScheduleEngine(UnitTestCase):
+	def test_reschedule_asap_accepts_boolean_forms_and_rejects_invalid_values(self):
+		parameter = inspect.signature(eng.reschedule_downstream).parameters["asap"]
+		self.assertEqual(parameter.annotation, bool | int)
+		self.assertIs(parameter.default, False)
+
+		root = type("Root", (), {"project": "PROJ-1"})()
+		tasks = {"root": _t("root")}
+		seen = []
+
+		def compute_cascade(*args, **kwargs):
+			seen.append(kwargs["asap"])
+			return []
+
+		with (
+			patch.object(eng.frappe, "get_doc", return_value=root),
+			patch.object(eng, "_load_graph", return_value=(tasks, [])),
+			patch.object(eng, "compute_cascade", side_effect=compute_cascade),
+			patch.object(eng, "recompute_schedule_conflicts"),
+		):
+			for value in (True, 1, "1"):
+				eng.reschedule_downstream("root", asap=value)
+
+			with self.assertRaises(frappe.ValidationError):
+				eng.reschedule_downstream("root", asap="yes")
+
+		self.assertEqual(seen, [True, True, True])
+
 	def test_cascade_moves_only_native_reschedulable_statuses(self):
 		tasks = {
 			"A": _t("A", start=date(2026, 1, 1), end=date(2026, 1, 10)),
