@@ -463,6 +463,37 @@ class TestScheduleEngine(UnitTestCase):
 
 		apply_moves.assert_not_called()
 
+	def test_zero_day_slip_is_a_no_op(self):
+		root = type(
+			"Root",
+			(),
+			{
+				"name": "root",
+				"project": "PROJ-1",
+				"exp_start_date": date(2026, 3, 1),
+				"exp_end_date": date(2026, 3, 10),
+			},
+		)()
+		eng.frappe.flags = type("Flags", (), {})()
+
+		with (
+			patch.object(eng.frappe, "get_doc", return_value=root),
+			patch.object(
+				eng,
+				"_load_graph",
+				return_value=(
+					{"root": _t("root", start=root.exp_start_date, end=root.exp_end_date)},
+					[],
+				),
+			),
+			patch.object(eng, "recompute_schedule_conflicts"),
+			patch("buildsuite_core.api.schedule_snapshot.capture_snapshot") as capture_snapshot,
+		):
+			result = eng.reschedule_downstream("root", dry_run=0, slip_days=0)
+
+		self.assertEqual(result, {"moves": []})
+		capture_snapshot.assert_not_called()
+
 	def test_load_graph_includes_actual_start_date(self):
 		class Row:
 			def __init__(self, **values):
