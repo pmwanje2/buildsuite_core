@@ -17,8 +17,15 @@ from buildsuite_core.api import schedule_engine as eng
 from buildsuite_core.tests.base import BuildSuiteTestCase
 
 
-def _t(name, type="Activity", start=None, end=None, status="Open"):
-	return {"name": name, "type": type, "start": start, "end": end, "status": status}
+def _t(name, type="Activity", start=None, end=None, status="Open", act_start_date=None):
+	return {
+		"name": name,
+		"type": type,
+		"start": start,
+		"end": end,
+		"status": status,
+		"act_start_date": act_start_date,
+	}
 
 
 def _e(pred, succ, type="FS", lag=0):
@@ -170,6 +177,7 @@ class TestScheduleEngine(UnitTestCase):
 		self.assertEqual(moves[0]["task"], "B")
 		self.assertEqual(moves[0]["new_start"], "2026-01-20")
 		self.assertEqual(moves[0]["new_end"], "2026-01-30")
+		self.assertIs(moves[0]["is_milestone"], False)
 
 	def test_cascade_no_pull_earlier(self):
 		# B already far later than A's end -> cascade leaves it untouched.
@@ -196,6 +204,161 @@ class TestScheduleEngine(UnitTestCase):
 		self.assertTrue(moves[0]["is_milestone"])
 		self.assertEqual(moves[0]["new_end"], "2026-01-10")
 		self.assertIsNone(moves[0]["new_start"])
+
+	def test_asap_fs_minus_two_pulls_successor_from_predecessor_or_successor_root(self):
+		tasks = {
+			"pred": _t("pred", start=date(2026, 3, 20), end=date(2026, 3, 31)),
+			"succ": _t("succ", start=date(2026, 4, 1), end=date(2026, 4, 10)),
+		}
+		edges = [_e("pred", "succ", type="FS", lag=-2)]
+
+		from_predecessor = eng.compute_cascade("pred", tasks, edges, asap=True)
+		from_successor = eng.compute_cascade("succ", tasks, edges, asap=True)
+
+		for moves in (from_predecessor, from_successor):
+			self.assertEqual(len(moves), 1)
+			self.assertEqual(moves[0]["task"], "succ")
+			self.assertEqual(moves[0]["new_start"], "2026-03-29")
+			self.assertEqual(moves[0]["new_end"], "2026-04-07")
+			self.assertIs(moves[0]["is_milestone"], False)
+
+	def test_asap_ss_plus_five_pulls_successor_to_predecessor_start_plus_lag(self):
+		tasks = {
+			"pred": _t("pred", start=date(2026, 3, 25), end=date(2026, 3, 31)),
+			"succ": _t("succ", start=date(2026, 4, 2), end=date(2026, 4, 10)),
+		}
+		moves = eng.compute_cascade("pred", tasks, [_e("pred", "succ", type="SS", lag=5)], asap=True)
+
+		self.assertEqual(len(moves), 1)
+		self.assertEqual(moves[0]["new_start"], "2026-03-30")
+		self.assertEqual(moves[0]["new_end"], "2026-04-07")
+
+	def test_asap_only_pulls_open_or_overdue_without_actual_start(self):
+		tasks = {
+			"pred": _t("pred", start=date(2026, 3, 20), end=date(2026, 3, 31)),
+			"open": _t("open", start=date(2026, 4, 1), end=date(2026, 4, 10), status="Open"),
+			"overdue": _t("overdue", start=date(2026, 4, 1), end=date(2026, 4, 10), status="Overdue"),
+			"completed": _t("completed", start=date(2026, 4, 1), end=date(2026, 4, 10), status="Completed"),
+			"working": _t("working", start=date(2026, 4, 1), end=date(2026, 4, 10), status="Working"),
+			"cancelled": _t("cancelled", start=date(2026, 4, 1), end=date(2026, 4, 10), status="Cancelled"),
+			"template": _t("template", start=date(2026, 4, 1), end=date(2026, 4, 10), status="Template"),
+			"actual": _t(
+				"actual",
+				start=date(2026, 4, 1),
+				end=date(2026, 4, 10),
+				status="Open",
+				act_start_date=date(2026, 3, 31),
+			),
+		}
+		edges = [_e("pred", task_id, type="FS", lag=-2) for task_id in tasks if task_id != "pred"]
+
+		moves = eng.compute_cascade("pred", tasks, edges, asap=True)
+
+		self.assertEqual({move["task"] for move in moves}, {"open", "overdue"})
+		self.assertTrue(all(move["is_milestone"] is False for move in moves))
+
+	def test_every_move_declares_boolean_milestone_flag(self):
+		tasks = {
+			"pred": _t("pred", start=date(2026, 1, 1), end=date(2026, 1, 10)),
+			"activity": _t("activity", start=date(2026, 1, 5), end=date(2026, 1, 15)),
+			"milestone": _t("milestone", type="Milestone", start=None, end=date(2026, 1, 5)),
+		}
+		moves = eng.compute_cascade(
+			"pred",
+			tasks,
+			[_e("pred", "activity"), _e("pred", "milestone")],
+		)
+
+		self.assertEqual({move["task"] for move in moves}, {"activity", "milestone"})
+		self.assertEqual(
+			{move["task"] for move in moves if move["is_milestone"]},
+			{"milestone"},
+		)
+		self.assertTrue(all(isinstance(move["is_milestone"], bool) for move in moves))
+
+	def test_slip_days_moves_zero_float_and_consumes_successor_float_and_preview_matches_commit(self):
+		tasks = {
+			"root": _t("root", start=date(2026, 3, 1), end=date(2026, 3, 10)),
+			"2.2": _t("2.2", start=date(2026, 3, 10), end=date(2026, 3, 15)),
+			"3.1": _t("3.1", start=date(2026, 3, 10), end=date(2026, 3, 15)),
+			"4.1": _t("4.1", start=date(2026, 3, 10), end=date(2026, 3, 15)),
+			"float-3": _t("float-3", start=date(2026, 3, 13), end=date(2026, 3, 18)),
+		}
+		edges = [_e("root", task_id) for task_id in tasks if task_id != "root"]
+		root = type(
+			"Root",
+			(),
+			{
+				"project": "PROJ-1",
+				"exp_start_date": date(2026, 3, 1),
+				"exp_end_date": date(2026, 3, 10),
+			},
+		)()
+
+		with (
+			patch.object(eng.frappe, "get_doc", return_value=root),
+			patch.object(eng, "_load_graph", return_value=(tasks, edges)),
+			patch.object(eng, "_apply_moves"),
+			patch.object(eng, "recompute_schedule_conflicts"),
+			patch("buildsuite_core.api.schedule_snapshot.capture_snapshot"),
+		):
+			preview = eng.reschedule_downstream("root", dry_run=1, slip_days=5)
+			commit = eng.reschedule_downstream("root", dry_run=0, slip_days=5)
+
+		self.assertEqual(preview, commit)
+		self.assertEqual(
+			{
+				move["task"]: eng._diff_days(tasks[move["task"]]["start"], move["new_start"])
+				for move in preview["moves"]
+			},
+			{"2.2": 5, "3.1": 5, "4.1": 5, "float-3": 2},
+		)
+
+	def test_load_graph_includes_actual_start_date(self):
+		class Row:
+			def __init__(self, **values):
+				self.__dict__.update(values)
+
+		def get_all(doctype, **kwargs):
+			if doctype == "Task":
+				return [
+					Row(
+						name="started",
+						type="Activity",
+						exp_start_date="2026-03-01",
+						exp_end_date="2026-03-10",
+						act_start_date="2026-03-02",
+						status="Working",
+						parent_task=None,
+					)
+				]
+			return []
+
+		with patch.object(eng.frappe, "get_all", side_effect=get_all):
+			tasks, _ = eng._load_graph("PROJ-1")
+
+		self.assertEqual(tasks["started"]["act_start_date"], date(2026, 3, 2))
+
+	def test_slip_days_rejects_explicit_date_override(self):
+		root = type(
+			"Root",
+			(),
+			{
+				"project": "PROJ-1",
+				"exp_start_date": date(2026, 3, 1),
+				"exp_end_date": date(2026, 3, 10),
+			},
+		)()
+
+		with (
+			patch.object(eng.frappe, "get_doc", return_value=root),
+			patch.object(eng, "_load_graph", return_value=({"root": _t("root")}, [])),
+			patch.object(eng.frappe, "throw", side_effect=ValueError),
+			self.assertRaises(ValueError),
+		):
+			eng.reschedule_downstream(
+				"root", new_start="2026-03-02", dry_run=1, slip_days=5
+			)
 
 	def test_inspection_gate_blocks_successor(self):
 		tasks = {
