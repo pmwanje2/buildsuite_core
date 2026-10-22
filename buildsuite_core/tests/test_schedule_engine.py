@@ -357,6 +357,7 @@ class TestScheduleEngine(UnitTestCase):
 
 	def test_root_only_slip_returns_root_move_snapshots_and_saves_root_once(self):
 		class Root:
+			name = "root"
 			project = "PROJ-1"
 			exp_start_date = date(2026, 3, 1)
 			exp_end_date = date(2026, 3, 10)
