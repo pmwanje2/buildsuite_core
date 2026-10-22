@@ -510,7 +510,7 @@ def reschedule_downstream(
 			or root_override.get("end") != (getdate(root.exp_end_date) if root.exp_end_date else None)
 		)
 	)
-	if root_changed:
+	if root_changed and slip_days is not None:
 		root_move = {
 			"task": task,
 			"old_start": _iso(getdate(root.exp_start_date) if root.exp_start_date else None),
@@ -527,8 +527,9 @@ def reschedule_downstream(
 
 	# A downstream cascade is a *group* action — capture an undo snapshot of the
 	# project schedule before mutating, so the whole shift can be reverted in one
-	# step. Skipped when nothing downstream moves (that's a single-task change).
-	if root_changed or moves:
+	# step. Explicit new_start/new_end-only changes stay single-task changes;
+	# slip and ASAP root alignment changes are represented in moves.
+	if moves:
 		from buildsuite_core.api.schedule_snapshot import capture_snapshot
 
 		capture_snapshot(root.project, "Undo", trigger="reschedule_downstream", root_task=task)
