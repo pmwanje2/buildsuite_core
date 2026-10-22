@@ -34,7 +34,7 @@ def _e(pred, succ, type="FS", lag=0):
 
 
 class TestScheduleEngine(UnitTestCase):
-	def test_reschedule_asap_accepts_boolean_forms_and_rejects_invalid_values(self):
+	def test_reschedule_asap_uses_native_truthiness_and_preserves_default(self):
 		parameter = inspect.signature(eng.reschedule_downstream).parameters["asap"]
 		self.assertEqual(parameter.annotation, bool | int)
 		self.assertIs(parameter.default, False)
@@ -53,13 +53,11 @@ class TestScheduleEngine(UnitTestCase):
 			patch.object(eng, "compute_cascade", side_effect=compute_cascade),
 			patch.object(eng, "recompute_schedule_conflicts"),
 		):
-			for value in (True, 1, "1"):
+			for value in (True, 1, "1", "yes"):
 				eng.reschedule_downstream("root", asap=value)
+			eng.reschedule_downstream("root")
 
-			with self.assertRaises(frappe.ValidationError):
-				eng.reschedule_downstream("root", asap="yes")
-
-		self.assertEqual(seen, [True, True, True])
+		self.assertEqual(seen, [True, True, True, True, False])
 
 	def test_cascade_moves_only_native_reschedulable_statuses(self):
 		tasks = {
