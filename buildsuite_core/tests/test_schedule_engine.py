@@ -402,6 +402,41 @@ class TestScheduleEngine(UnitTestCase):
 		)
 		self.assertEqual(root.saves, 1)
 
+	def test_apply_moves_writes_milestone_start_before_normalization_hook(self):
+		class StubDoc:
+			def __init__(self, name, type, start, end):
+				self.name = name
+				self.type = type
+				self.exp_start_date = start
+				self.exp_end_date = end
+				self.saves = []
+
+			def save(self, **kwargs):
+				# Mimic normalize_milestone_task: a milestone with a start collapses
+				# its end to that start during save.
+				if self.type == "Milestone" and self.exp_start_date:
+					self.exp_end_date = self.exp_start_date
+				self.saves.append((self.exp_start_date, self.exp_end_date))
+
+		root = StubDoc("root", "Activity", date(2026, 3, 1), date(2026, 3, 10))
+		milestone = StubDoc("milestone", "Milestone", date(2026, 3, 12), date(2026, 3, 12))
+		eng.frappe.flags = type("Flags", (), {})()
+
+		with patch.object(eng.frappe, "get_doc", return_value=milestone):
+			eng._apply_moves(
+				root,
+				[
+					{
+						"task": "milestone",
+						"new_start": None,
+						"new_end": "2026-03-20",
+						"is_milestone": True,
+					}
+				],
+			)
+
+		self.assertEqual(milestone.saves, [("2026-03-20", "2026-03-20")])
+
 	def test_load_graph_includes_actual_start_date(self):
 		class Row:
 			def __init__(self, **values):
