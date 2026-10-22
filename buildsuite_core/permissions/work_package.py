@@ -7,13 +7,13 @@ so no own-scope rules are needed — visibility is the only thing to enforce.
 
 import frappe
 
-from buildsuite_core.permissions.project import _is_project_member, _is_scoped
+from buildsuite_core.permissions.project import _is_project_member, _is_read_scoped, _is_scoped
 
 
 def get_work_package_permission_query(user):
 	if not user:
 		user = frappe.session.user
-	if not _is_scoped(user):
+	if not _is_read_scoped(user):
 		return ""
 
 	return (
@@ -28,6 +28,8 @@ def has_work_package_permission(doc, ptype="read", user=None):
 	if not user:
 		user = frappe.session.user
 	if not _is_scoped(user):
+		return True
+	if ptype in ("read", "select", "report", "print", "export") and not _is_read_scoped(user):
 		return True
 
 	project = getattr(doc, "project", None)

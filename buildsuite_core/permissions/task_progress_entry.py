@@ -13,7 +13,7 @@ Full-write roles (Director, PM, BS-Admin, System Manager) bypass the own-scope.
 import frappe
 from frappe.utils import get_datetime, now_datetime
 
-from buildsuite_core.permissions.project import _is_project_member, _is_scoped
+from buildsuite_core.permissions.project import _is_project_member, _is_read_scoped, _is_scoped
 
 FULL_WRITE_ROLES = {
 	"BuildSuite Director",
@@ -43,7 +43,7 @@ def _within_delete_window(doc):
 def get_task_progress_entry_permission_query(user):
 	if not user:
 		user = frappe.session.user
-	if not _is_scoped(user):
+	if not _is_read_scoped(user):
 		return ""
 
 	return (
@@ -59,6 +59,8 @@ def has_task_progress_entry_permission(doc, ptype="read", user=None):
 	if not user:
 		user = frappe.session.user
 	if not _is_scoped(user):
+		return True
+	if ptype in ("read", "select", "report", "print", "export") and not _is_read_scoped(user):
 		return True
 
 	project = _entry_project(doc)
