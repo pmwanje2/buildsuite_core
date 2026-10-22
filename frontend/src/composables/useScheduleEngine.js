@@ -274,6 +274,7 @@ export function computeCascade(rootId, tasksById, edges, rootOverride = null) {
 					new_start: iso(binding),
 					new_end: iso(newEnd),
 					reason: bindingReason,
+					is_milestone: false,
 				});
 				working.set(tid, { ...cur, start: binding, end: newEnd });
 			}
