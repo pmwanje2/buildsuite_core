@@ -232,6 +232,106 @@ class TestProjectCompanyRolesScope(unittest.TestCase):
 				self.assertTrue(modules["project"]._is_scoped("finance@example.com"))
 				self.assertIn("tabProject", modules["project"].get_project_permission_query("finance@example.com"))
 
+	def test_company_write_role_can_write_unteamed_project_and_list_all_projects(self):
+		frappe, modules = _load_permission_modules()
+		frappe.conf["project_company_write_roles"] = ["Operations Director SCL"]
+		frappe.get_roles = lambda user: ["Operations Director SCL"]
+		frappe.db.exists.return_value = False
+		project = _StubDocument(name="PROJECT-001")
+
+		self.assertTrue(
+			modules["project"].has_project_permission(
+				project, ptype="write", user="operations@example.com"
+			)
+		)
+		self.assertEqual(
+			modules["project"].get_project_permission_query("operations@example.com"), ""
+		)
+
+	def test_read_only_company_role_stays_write_refused_when_different_write_role_is_configured(self):
+		frappe, modules = _load_permission_modules()
+		frappe.conf["project_company_roles"] = ["Finance Oversight"]
+		frappe.conf["project_company_write_roles"] = ["Operations Director SCL"]
+		frappe.get_roles = lambda user: ["Finance Oversight"]
+		frappe.db.exists.return_value = False
+		project = _StubDocument(name="PROJECT-001")
+
+		self.assertFalse(
+			modules["project"].has_project_permission(
+				project, ptype="write", user="finance@example.com"
+			)
+		)
+		self.assertEqual(modules["project"].get_project_permission_query("finance@example.com"), "")
+
+	def test_read_only_company_role_with_hr_user_stays_write_refused(self):
+		frappe, modules = _load_permission_modules()
+		frappe.conf["project_company_roles"] = ["Finance Oversight"]
+		frappe.conf["project_company_write_roles"] = ["Operations Director SCL"]
+		frappe.get_roles = lambda user: ["Finance Oversight", "HR User"]
+		frappe.db.exists.return_value = False
+
+		self.assertFalse(
+			modules["project"].has_project_permission(
+				types.SimpleNamespace(name="PROJECT-001"),
+				ptype="write",
+				user="finance-hr@example.com",
+			)
+		)
+
+	def test_malformed_company_write_role_setting_is_ignored(self):
+		frappe, modules = _load_permission_modules()
+		frappe.get_roles = lambda user: ["Operations Director SCL"]
+		frappe.db.exists.return_value = False
+
+		cases = {
+			"string": "Operations Director SCL",
+			"mixed_list": ["Operations Director SCL", 7],
+		}
+		for label, setting in cases.items():
+			with self.subTest(setting=label):
+				frappe.conf = {"project_company_write_roles": setting}
+				self.assertFalse(
+					modules["project"].has_project_permission(
+						types.SimpleNamespace(name="PROJECT-001"),
+						ptype="write",
+						user="operations@example.com",
+					)
+				)
+				self.assertIn(
+					"tabProject",
+					modules["project"].get_project_permission_query("operations@example.com"),
+				)
+
+	def test_company_write_role_does_not_widen_task_write_for_non_member(self):
+		frappe, modules = _load_permission_modules()
+		frappe.conf["project_company_write_roles"] = ["Operations Director SCL"]
+		frappe.get_roles = lambda user: ["Operations Director SCL"]
+		frappe.db.exists.return_value = False
+		task = _StubDocument(name="TASK-001", project="PROJECT-001", owner="other@example.com")
+
+		self.assertFalse(
+			modules["task"].has_task_permission(
+				task, ptype="write", user="operations@example.com"
+			)
+		)
+
+	def test_missing_company_role_settings_keep_project_write_team_scoped(self):
+		frappe, modules = _load_permission_modules()
+		frappe.conf = {}
+		frappe.get_roles = lambda user: ["BuildSuite Site Engineer"]
+		frappe.db.exists.return_value = False
+		project = _StubDocument(name="PROJECT-001")
+
+		self.assertIn(
+			"tabProject",
+			modules["project"].get_project_permission_query("site@example.com"),
+		)
+		self.assertFalse(
+			modules["project"].has_project_permission(
+				project, ptype="write", user="site@example.com"
+			)
+		)
+
 
 if __name__ == "__main__":
 	unittest.main()
