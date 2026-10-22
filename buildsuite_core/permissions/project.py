@@ -72,10 +72,23 @@ def _is_scoped(user):
 	return True
 
 
+def _has_company_role(user):
+	company_roles = frappe.conf.get("project_company_roles")
+	return bool(
+		isinstance(company_roles, list)
+		and all(isinstance(role, str) for role in company_roles)
+		and set(company_roles) & set(frappe.get_roles(user))
+	)
+
+
+def _is_read_scoped(user):
+	return _is_scoped(user) and not _has_company_role(user)
+
+
 def get_project_permission_query(user):
 	if not user:
 		user = frappe.session.user
-	if not _is_scoped(user):
+	if not _is_read_scoped(user):
 		return ""
 
 	return (
@@ -90,6 +103,8 @@ def has_project_permission(doc, ptype="read", user=None):
 	if not user:
 		user = frappe.session.user
 	if not _is_scoped(user):
+		return True
+	if ptype in ("read", "select", "report", "print", "export") and not _is_read_scoped(user):
 		return True
 
 	# Creating a new project isn't gated by team membership (the project doesn't
