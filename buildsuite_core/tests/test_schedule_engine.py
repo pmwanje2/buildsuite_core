@@ -352,8 +352,54 @@ class TestScheduleEngine(UnitTestCase):
 				move["task"]: eng._diff_days(tasks[move["task"]]["start"], move["new_start"])
 				for move in preview["moves"]
 			},
-			{"2.2": 5, "3.1": 5, "4.1": 5, "float-3": 2},
+			{"root": 5, "2.2": 5, "3.1": 5, "4.1": 5, "float-3": 2},
 		)
+
+	def test_root_only_slip_returns_root_move_snapshots_and_saves_root_once(self):
+		class Root:
+			project = "PROJ-1"
+			exp_start_date = date(2026, 3, 1)
+			exp_end_date = date(2026, 3, 10)
+
+			def __init__(self):
+				self.flags = type("Flags", (), {"ignore_permissions": False})()
+				self.saves = 0
+
+			def save(self, **kwargs):
+				self.saves += 1
+
+		root = Root()
+		tasks = {"root": _t("root", start=root.exp_start_date, end=root.exp_end_date)}
+		eng.frappe.flags = type("Flags", (), {})()
+
+		with (
+			patch.object(eng.frappe, "get_doc", return_value=root),
+			patch.object(eng, "_load_graph", return_value=(tasks, [])),
+			patch.object(eng, "recompute_schedule_conflicts"),
+			patch("buildsuite_core.api.schedule_snapshot.capture_snapshot") as capture_snapshot,
+		):
+			preview = eng.reschedule_downstream("root", dry_run=1, slip_days=5)
+			commit = eng.reschedule_downstream("root", dry_run=0, slip_days=5)
+
+		self.assertEqual(preview, commit)
+		self.assertEqual(
+			preview["moves"],
+			[
+				{
+					"task": "root",
+					"old_start": "2026-03-01",
+					"old_end": "2026-03-10",
+					"new_start": "2026-03-06",
+					"new_end": "2026-03-15",
+					"reason": "slip 5 days",
+					"is_milestone": False,
+				}
+			],
+		)
+		capture_snapshot.assert_called_once_with(
+			"PROJ-1", "Undo", trigger="reschedule_downstream", root_task="root"
+		)
+		self.assertEqual(root.saves, 1)
 
 	def test_load_graph_includes_actual_start_date(self):
 		class Row:
