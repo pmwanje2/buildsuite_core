@@ -387,6 +387,7 @@ def _apply_moves(root, moves, root_override=None, native_reschedule=False):
 			t = frappe.get_doc("Task", m["task"])
 			if m.get("is_milestone"):
 				# normalize_milestone_task collapses start to end on save.
+				t.exp_start_date = m["new_end"]
 				t.exp_end_date = m["new_end"]
 			else:
 				t.exp_start_date = m["new_start"]
