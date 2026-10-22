@@ -450,7 +450,7 @@ def reschedule_downstream(
 	new_start: str | None = None,
 	new_end: str | None = None,
 	dry_run: int = 1,
-	asap: int = 0,
+	asap: bool | int = False,
 	slip_days: int | None = None,
 ):
 	"""Preview (dry_run=1) or commit (dry_run=0) a duration-preserving downstream
@@ -499,7 +499,7 @@ def reschedule_downstream(
 			"end": end,
 		}
 
-	moves = compute_cascade(task, tasks_by_id, edges, root_override, asap=bool(int(asap)))
+	moves = compute_cascade(task, tasks_by_id, edges, root_override, asap=bool(asap))
 	if moves is None:
 		frappe.throw(_("Cycle detected in the downstream schedule — cascade aborted."))
 
