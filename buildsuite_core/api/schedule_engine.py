@@ -478,8 +478,6 @@ def reschedule_downstream(
 		slip = int(slip_days)
 		old_start = getdate(root.exp_start_date) if root.exp_start_date else None
 		old_end = getdate(root.exp_end_date) if root.exp_end_date else None
-		if old_start is None and old_end is None:
-			frappe.throw(_("slip_days requires the root task to have at least one expected date."))
 		root_override = {
 			"start": _add_days(old_start, slip),
 			"end": _add_days(old_end, slip),
