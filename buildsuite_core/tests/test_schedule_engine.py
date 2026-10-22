@@ -437,6 +437,32 @@ class TestScheduleEngine(UnitTestCase):
 
 		self.assertEqual(milestone.saves, [("2026-03-20", "2026-03-20")])
 
+	def test_slip_days_rejects_root_with_both_expected_dates_missing(self):
+		root = type(
+			"Root",
+			(),
+			{
+				"project": "PROJ-1",
+				"exp_start_date": None,
+				"exp_end_date": None,
+			},
+		)()
+
+		def throw(message, exc=None):
+			raise ValueError(message)
+
+		with (
+			patch.object(eng.frappe, "get_doc", return_value=root),
+			patch.object(eng, "_load_graph", return_value=({"root": _t("root")}, [])),
+			patch.object(eng.frappe, "throw", side_effect=throw),
+			patch.object(eng, "_apply_moves") as apply_moves,
+			patch.object(eng, "recompute_schedule_conflicts"),
+			self.assertRaisesRegex(ValueError, "slip_days requires the root task to have at least one expected date"),
+		):
+			eng.reschedule_downstream("root", dry_run=0, slip_days=5)
+
+		apply_moves.assert_not_called()
+
 	def test_load_graph_includes_actual_start_date(self):
 		class Row:
 			def __init__(self, **values):
