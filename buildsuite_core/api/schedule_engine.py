@@ -215,7 +215,12 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None, asap=False)
 		if tid == root_id and not (asap and root_override is None):
 			continue
 		task = tasks_by_id.get(tid)
-		if not task or not _is_reschedulable_status(task.get("status")):
+		if not task:
+			continue
+		if tid == root_id:
+			if task.get("status") not in ("Open", "Overdue") or task.get("act_start_date"):
+				continue
+		elif not _is_reschedulable_status(task.get("status")):
 			continue
 		cur = working.get(tid)
 		if not cur:
