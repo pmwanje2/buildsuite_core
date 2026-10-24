@@ -554,7 +554,11 @@ def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
 				except Exception as exc:
 					frappe.db.rollback(save_point=savepoint)
 					del frappe.local.message_log[prior_log_len:]
-					if isinstance(exc, frappe.ValidationError):
+					if (
+						isinstance(exc, frappe.ValidationError)
+						and len(exc.args) == 1
+						and isinstance(exc.args[0], str)
+					):
 						message = frappe.utils.strip_html_tags(str(exc))
 					else:
 						frappe.log_error(
