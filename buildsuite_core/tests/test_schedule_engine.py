@@ -109,7 +109,6 @@ def _ensure_frappe_stub():
 		):
 			if not hasattr(frappe, attr):
 				setattr(frappe, attr, default)
-		frappe.get_list = _stub_get_list
 	return frappe
 
 
@@ -403,10 +402,6 @@ class TestCriticalPath(unittest.TestCase):
 			with patch.object(fake_frappe, "get_list", _stub_get_list):
 				self.assertIs(fake_frappe.get_list, _stub_get_list)
 			self.assertIs(fake_frappe.get_list, existing_get_list)
-
-	def test_stub_get_list_rejects_child_table_without_parent_doctype(self):
-		with self.assertRaises(eng.frappe.PermissionError):
-			eng.frappe.get_list("Task Depends On", filters={"parent": ["in", ["A"]]})
 
 	def test_get_critical_path_checks_project_read_and_passes_parent_doctype(self):
 		class Row:
