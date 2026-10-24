@@ -9,7 +9,98 @@ server's authoritative commit never disagree.
 
 from datetime import date
 import inspect
+import sys
+import types
+import unittest
 from unittest.mock import patch
+
+
+def _ensure_frappe_stub():
+	try:
+		import frappe
+	except ModuleNotFoundError:
+		frappe = types.ModuleType("frappe")
+		frappe.__path__ = []
+		frappe._ = lambda value, *args: value
+		frappe.PermissionError = PermissionError
+		frappe.ValidationError = ValueError
+		frappe.DoesNotExistError = LookupError
+
+		def _throw(msg, exc=ValueError):
+			if isinstance(exc, type) and issubclass(exc, BaseException):
+				raise exc(msg)
+			raise ValueError(msg)
+
+		def _whitelist(*args, **kwargs):
+			def _mark(fn):
+				fn._whitelisted = True
+				return fn
+
+			return _mark
+
+		frappe.throw = _throw
+		frappe.whitelist = _whitelist
+		frappe.get_all = lambda *args, **kwargs: []
+		frappe.get_list = lambda *args, **kwargs: frappe.get_all(*args, **kwargs)
+		frappe.get_doc = lambda *args, **kwargs: None
+		frappe.has_permission = lambda *args, **kwargs: True
+		frappe.set_user = lambda *args, **kwargs: None
+		frappe.generate_hash = lambda length=6: "0" * length
+		frappe.flags = types.SimpleNamespace()
+		frappe.db = types.SimpleNamespace(
+			exists=lambda *args, **kwargs: False,
+			get_value=lambda *args, **kwargs: None,
+			set_value=lambda *args, **kwargs: None,
+			rollback=lambda *args, **kwargs: None,
+		)
+		frappe.tests = types.ModuleType("frappe.tests")
+		frappe.tests.UnitTestCase = unittest.TestCase
+		frappe_utils = types.ModuleType("frappe.utils")
+		frappe_utils.flt = lambda value: float(value or 0)
+		frappe_utils.cint = lambda value, default=0: int(float(value)) if value is not None else default
+		frappe_utils.today = lambda: "2026-01-01"
+		frappe_utils.getdate = (
+			lambda value=None: value
+			if isinstance(value, date)
+			else date.fromisoformat(str(value)[:10])
+			if value
+			else date(2026, 1, 1)
+		)
+		sys.modules["frappe"] = frappe
+		sys.modules["frappe.tests"] = frappe.tests
+		sys.modules["frappe.utils"] = frappe_utils
+	else:
+		frappe_utils = sys.modules.get("frappe.utils")
+		if frappe_utils is not None and not hasattr(frappe_utils, "getdate"):
+			frappe_utils.getdate = (
+				lambda value=None: value
+				if isinstance(value, date)
+				else date.fromisoformat(str(value)[:10])
+				if value
+				else date(2026, 1, 1)
+			)
+		for attr, default in (
+			("get_all", lambda *args, **kwargs: []),
+			("get_list", lambda *args, **kwargs: frappe.get_all(*args, **kwargs)),
+			("get_doc", lambda *args, **kwargs: None),
+			("has_permission", lambda *args, **kwargs: True),
+			("flags", types.SimpleNamespace()),
+			(
+				"db",
+				types.SimpleNamespace(
+					exists=lambda *args, **kwargs: False,
+					get_value=lambda *args, **kwargs: None,
+					set_value=lambda *args, **kwargs: None,
+					rollback=lambda *args, **kwargs: None,
+				),
+			),
+		):
+			if not hasattr(frappe, attr):
+				setattr(frappe, attr, default)
+	return frappe
+
+
+_ensure_frappe_stub()
 
 import frappe
 from frappe.tests import UnitTestCase
@@ -31,6 +122,206 @@ def _t(name, type="Activity", start=None, end=None, status="Open", act_start_dat
 
 def _e(pred, succ, type="FS", lag=0):
 	return {"predecessor": pred, "successor": succ, "type": type, "lag": lag}
+
+
+def _cpm_t(
+	name,
+	start,
+	end,
+	status="Open",
+	progress=0,
+	type="Activity",
+	act_start_date=None,
+	act_end_date=None,
+):
+	return {
+		"name": name,
+		"type": type,
+		"start": start,
+		"end": end,
+		"status": status,
+		"progress": progress,
+		"act_start_date": act_start_date,
+		"act_end_date": act_end_date,
+	}
+
+
+class TestCriticalPath(unittest.TestCase):
+	def test_parallel_paths_report_total_and_free_float(self):
+		tasks = {
+			"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 11)),
+			"B": _cpm_t("B", date(2026, 1, 1), date(2026, 1, 5)),
+			"D": _cpm_t("D", date(2026, 1, 1), date(2026, 1, 3)),
+			"C": _cpm_t("C", date(2026, 1, 1), date(2026, 1, 6)),
+		}
+		result = eng.compute_cpm(
+			tasks,
+			[_e("A", "C"), _e("B", "D"), _e("D", "C")],
+			date(2026, 1, 1),
+		)
+
+		by_task = {row["task"]: row for row in result}
+		self.assertEqual(by_task["A"]["total_float"], 0)
+		self.assertEqual(by_task["A"]["free_float"], 0)
+		self.assertEqual(by_task["B"]["total_float"], 4)
+		self.assertEqual(by_task["B"]["free_float"], 0)
+		self.assertEqual(by_task["D"]["total_float"], 4)
+		self.assertEqual(by_task["D"]["free_float"], 4)
+		self.assertEqual(by_task["C"]["total_float"], 0)
+		self.assertEqual(by_task["C"]["free_float"], 0)
+		self.assertTrue(by_task["A"]["critical"])
+		self.assertTrue(by_task["C"]["critical"])
+		self.assertFalse(by_task["B"]["critical"])
+		self.assertFalse(by_task["D"]["critical"])
+
+	def test_ss_and_ff_lags_drive_early_dates(self):
+		tasks = {
+			"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 11)),
+			"B": _cpm_t("B", date(2026, 1, 1), date(2026, 1, 5)),
+			"C": _cpm_t("C", date(2026, 1, 1), date(2026, 1, 5)),
+		}
+		result = eng.compute_cpm(
+			tasks,
+			[_e("A", "B", type="SS", lag=3), _e("A", "C", type="FF", lag=2)],
+			date(2026, 1, 1),
+		)
+
+		by_task = {row["task"]: row for row in result}
+		self.assertEqual(by_task["B"]["early_start"], "2026-01-04")
+		self.assertEqual(by_task["B"]["early_finish"], "2026-01-08")
+		self.assertEqual(by_task["C"]["early_start"], "2026-01-09")
+		self.assertEqual(by_task["C"]["early_finish"], "2026-01-13")
+		self.assertEqual(by_task["A"]["late_finish"], "2026-01-11")
+		self.assertEqual(by_task["A"]["total_float"], 0)
+		self.assertEqual(by_task["B"]["total_float"], 5)
+		self.assertEqual(by_task["C"]["total_float"], 0)
+
+	def test_milestone_has_zero_duration_and_single_date(self):
+		tasks = {
+			"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 5)),
+			"M": _cpm_t(
+				"M", None, date(2026, 1, 5), type="Milestone"
+			),
+		}
+		result = eng.compute_cpm(tasks, [_e("A", "M")], date(2026, 1, 1))
+		milestone = next(row for row in result if row["task"] == "M")
+
+		self.assertEqual(milestone["early_start"], "2026-01-05")
+		self.assertEqual(milestone["early_finish"], "2026-01-05")
+		self.assertEqual(milestone["late_start"], "2026-01-05")
+		self.assertEqual(milestone["late_finish"], "2026-01-05")
+		self.assertTrue(milestone["critical"])
+
+	def test_finish_constraint_can_produce_negative_float(self):
+		tasks = {"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 11))}
+		row = eng.compute_cpm(tasks, [], date(2026, 1, 1), finish_constraint=date(2026, 1, 6))[0]
+
+		self.assertEqual(row["total_float"], -5)
+		self.assertEqual(row["free_float"], -5)
+		self.assertTrue(row["critical"])
+
+	def test_cycle_is_refused_with_stable_schedule_code(self):
+		tasks = {
+			"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 3)),
+			"B": _cpm_t("B", date(2026, 1, 3), date(2026, 1, 5)),
+		}
+		with self.assertRaisesRegex(ValueError, "SCHEDULE_CYCLE"):
+			eng.compute_cpm(tasks, [_e("A", "B"), _e("B", "A")], date(2026, 1, 1))
+
+	def test_completed_task_is_fixed_to_actuals_before_data_date(self):
+		tasks = {
+			"A": _cpm_t(
+				"A",
+				date(2026, 1, 1),
+				date(2026, 1, 11),
+				status="Completed",
+				progress=100,
+				act_start_date=date(2026, 1, 2),
+				act_end_date=date(2026, 1, 8),
+			),
+			"B": _cpm_t(
+				"B",
+				date(2026, 1, 5),
+				date(2026, 1, 15),
+				status="Working",
+				progress=60,
+				act_start_date=date(2026, 1, 6),
+			),
+			"C": _cpm_t("C", date(2026, 1, 15), date(2026, 1, 18)),
+		}
+		result = eng.compute_cpm(tasks, [_e("A", "B"), _e("B", "C")], date(2026, 1, 10))
+		by_task = {row["task"]: row for row in result}
+
+		self.assertEqual(by_task["A"]["early_start"], "2026-01-02")
+		self.assertEqual(by_task["A"]["early_finish"], "2026-01-08")
+		self.assertFalse(by_task["A"]["critical"])
+		self.assertEqual(by_task["B"]["early_start"], "2026-01-10")
+		self.assertEqual(by_task["B"]["early_finish"], "2026-01-14")
+		self.assertTrue(by_task["B"]["critical"])
+		self.assertEqual(by_task["C"]["early_start"], "2026-01-14")
+		self.assertEqual(by_task["C"]["early_finish"], "2026-01-17")
+		self.assertTrue(by_task["C"]["critical"])
+
+	def test_not_started_task_keeps_a_planned_start_after_data_date(self):
+		tasks = {
+			"A": _cpm_t("A", date(2026, 1, 20), date(2026, 1, 25)),
+		}
+		row = eng.compute_cpm(tasks, [], date(2026, 1, 10))[0]
+
+		self.assertEqual(row["early_start"], "2026-01-20")
+		self.assertEqual(row["early_finish"], "2026-01-25")
+
+	def test_get_critical_path_uses_the_schedule_loader_without_writing(self):
+		tasks = {"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 3))}
+		with patch.object(eng, "_load_graph", return_value=(tasks, [])) as load_graph:
+			result = eng.get_critical_path("PROJ-1", data_date="2026-01-01")
+
+		load_graph.assert_called_once_with("PROJ-1")
+		self.assertEqual(result[0]["task"], "A")
+		self.assertEqual(set(result[0]), {
+			"task",
+			"early_start",
+			"early_finish",
+			"late_start",
+			"late_finish",
+			"total_float",
+			"free_float",
+			"critical",
+		})
+
+	def test_schedule_loader_uses_permission_respecting_lists(self):
+		class Row:
+			def __init__(self, **values):
+				self.__dict__.update(values)
+
+		task_rows = [
+			Row(
+				name="A",
+				type="Activity",
+				exp_start_date="2026-01-01",
+				exp_end_date="2026-01-03",
+				act_start_date=None,
+				act_end_date=None,
+				progress=0,
+				status="Open",
+				parent_task=None,
+			)
+		]
+		edge_rows = []
+		def get_list(doctype, **kwargs):
+			return task_rows if doctype == "Task" else edge_rows
+
+		with (
+			patch.object(eng.frappe, "get_list", side_effect=get_list) as get_list_mock,
+			patch.object(eng.frappe, "get_all", side_effect=AssertionError("bypass")),
+		):
+			eng._load_graph("PROJ-1")
+
+		self.assertEqual(get_list_mock.call_count, 2)
+		self.assertEqual(
+			[get_list_mock.call_args_list[0].args[0], get_list_mock.call_args_list[1].args[0]],
+			["Task", "Task Depends On"],
+		)
 
 
 class TestScheduleEngine(UnitTestCase):
@@ -153,7 +444,7 @@ class TestScheduleEngine(UnitTestCase):
 			def __init__(self, **values):
 				self.__dict__.update(values)
 
-		def get_all(doctype, **kwargs):
+		def get_list(doctype, **kwargs):
 			if doctype == "Task":
 				return [
 					Row(name="1.0", type="Activity", exp_start_date="2026-01-01", exp_end_date="2026-01-10", status="Open", parent_task=None),
@@ -166,7 +457,7 @@ class TestScheduleEngine(UnitTestCase):
 				Row(parent="2.2", task="2.1", dependency_type="FS", lag_days=0),
 			]
 
-		with patch.object(eng.frappe, "get_all", side_effect=get_all):
+		with patch.object(eng.frappe, "get_list", side_effect=get_list):
 			_, edges = eng._load_graph("PROJ-1")
 		self.assertEqual(edges, [{"predecessor": "2.1", "successor": "2.2", "type": "FS", "lag": 0}])
 
@@ -578,7 +869,7 @@ class TestScheduleEngine(UnitTestCase):
 				]
 			return []
 
-		with patch.object(eng.frappe, "get_all", side_effect=get_all):
+		with patch.object(eng.frappe, "get_list", side_effect=get_all):
 			tasks, _ = eng._load_graph("PROJ-1")
 
 		self.assertEqual(tasks["started"]["act_start_date"], date(2026, 3, 2))
