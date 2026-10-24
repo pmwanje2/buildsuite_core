@@ -103,6 +103,25 @@ Pure functions over an in-memory graph (`_load_graph(project)` → `tasks_by_id`
     save the root + each move under `frappe.flags.in_schedule_cascade` (per-Task write perms +
     progress/stage hooks still run; per-save conflict re-flag suppressed), and
     `recompute_schedule_conflicts` once at the end.
+- **`compute_cpm(tasks, edges, data_date, finish_constraint=None)`** — **CPM (READ-ONLY)**:
+  forward + backward pass from `data_date` returning `{"tasks": [...], "skipped": [...]}`.
+  - Follows the Oracle P6 **retained logic** default: an open task with **no** predecessors
+    starts at `max(data_date, planned start)` (planned start acts as a start-no-earlier-than
+    for unconstrained activities); tasks **with** predecessors respect
+    `max(predecessor-driven date, data_date)` and do not use planned start.
+  - In-progress tasks start at `max(predecessor-driven date, data_date)` with remaining
+    duration `math.ceil(planned_dur * (100 - progress) / 100)`.
+  - Completed tasks are fixed to actuals (or planned fallback), are never marked critical
+    (`critical=False`), and report `total_float=None`, `free_float=None`. For open tasks,
+    `free_float` never exceeds `total_float`.
+  - Group/summary tasks (`is_group=1`) and `Cancelled` tasks are excluded from the CPM
+    network and any edges touching them are dropped. Tasks missing required dates are
+    excluded and returned in `skipped`.
+- **`get_critical_path(project, data_date=None)`** — @whitelist. Checks
+  `frappe.has_permission("Project", "read", project)` and loads the graph via
+  permission-respecting `frappe.get_list` on `Task` and `Task Depends On`
+  (`parent_doctype="Task"`), while `_load_graph(project)` stays unfiltered (`frappe.get_all`)
+  for internal/write paths.
 
 ---
 
