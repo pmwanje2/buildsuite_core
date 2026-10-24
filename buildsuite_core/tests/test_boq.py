@@ -3,7 +3,13 @@
 """BOQ: totals roll-up, cascade delete, sub-item rate snapshot, Assembly explosion,
 revisions, approve-supersede and actuals recompute."""
 
-import frappe
+import json
+import unittest
+from unittest.mock import patch
+
+from buildsuite_core.tests._boq_stub import AssignmentDoc, AssignmentFrappe, ensure_frappe_stub
+
+frappe = ensure_frappe_stub()
 
 from buildsuite_core.api import boq as api
 from buildsuite_core.tests.base import BuildSuiteTestCase
@@ -236,8 +242,18 @@ class TestBOQ(BuildSuiteTestCase):
 				"template_code": f"TPL-{frappe.generate_hash(length=5)}",
 				"template_name": "Tpl",
 				"rows": [
-					{"group_name": "Civil", "line_type": "Assembly", "assembly": asm.name, "placeholder_qty": 4},
-					{"group_name": "Civil", "line_type": "Resource", "resource": rm.name, "placeholder_qty": 3},
+					{
+						"group_name": "Civil",
+						"line_type": "Assembly",
+						"assembly": asm.name,
+						"placeholder_qty": 4,
+					},
+					{
+						"group_name": "Civil",
+						"line_type": "Resource",
+						"resource": rm.name,
+						"placeholder_qty": 3,
+					},
 				],
 			}
 		).insert(ignore_permissions=True)
@@ -401,9 +417,7 @@ class TestBOQ(BuildSuiteTestCase):
 
 		it = self._item(b.name, g.name, 1, 0, assembly=asm.name, driving_qty=1)
 		api.explode_item(it.name)
-		subs = frappe.get_all(
-			"BOQ Sub Item", filters={"boq_item": it.name}, fields=["rate_master", "amount"]
-		)
+		subs = frappe.get_all("BOQ Sub Item", filters={"boq_item": it.name}, fields=["rate_master", "amount"])
 		self.assertEqual(len(subs), 2)
 		by_resource = {s.rate_master: s for s in subs}
 		self.assertEqual(by_resource[r_nos.name].amount, 200)
@@ -457,3 +471,263 @@ class TestBOQ(BuildSuiteTestCase):
 		by_wp = {r.work_package: r for r in b.wp_summaries}
 		self.assertEqual(by_wp[wp_a.name].planned_amount, 3000)
 		self.assertEqual(by_wp[wp_b.name].planned_amount, 1000)
+
+
+class TestAssignWorkPackages(unittest.TestCase):
+	def setUp(self):
+		self.boq = AssignmentDoc(doctype="BOQ", name="BOQ-1", project="PROJ-1", status="Approved")
+		self.wp_a = AssignmentDoc(name="WP-A", project="PROJ-1", status="Planned")
+		self.wp_b = AssignmentDoc(name="WP-B", project="PROJ-1", status="Planned")
+		self.wp_closed = AssignmentDoc(name="WP-C", project="PROJ-1", status="Completed")
+		self.wp_other = AssignmentDoc(name="WP-X", project="PROJ-2", status="Planned")
+		self.items = [
+			AssignmentDoc(name="I-1", boq="BOQ-1", work_package=None, planned_amount=100),
+			AssignmentDoc(name="I-2", boq="BOQ-1", work_package="WP-A", planned_amount=200),
+			AssignmentDoc(name="I-3", boq="BOQ-OTHER", work_package=None, planned_amount=300),
+			AssignmentDoc(name="I-4", boq="BOQ-1", work_package=None, planned_amount=400),
+			AssignmentDoc(name="I-5", boq="BOQ-1", work_package=None, planned_amount=500),
+			AssignmentDoc(name="I-6", boq="BOQ-1", work_package=None, planned_amount=600),
+		]
+		self.frappe = AssignmentFrappe(
+			self.boq,
+			self.items,
+			[self.wp_a, self.wp_b, self.wp_closed, self.wp_other],
+			denied=("I-5",),
+		)
+		self.frappe.flags.boq_skip_rollup = "prior"
+		self.frappe_patch = patch.object(api, "frappe", self.frappe)
+		self.frappe_patch.start()
+		self.recompute = patch.object(api, "recompute_boq").start()
+		self.addCleanup(patch.stopall)
+
+	def test_test_run_accepts_json_and_returns_before_after_package_totals_without_writes(self):
+		self.items[4].work_package = "WP-A"
+		self.frappe.unreadable.add("I-5")
+		result = api.assign_work_packages(
+			"BOQ-1",
+			json.dumps(
+				[
+					{"boq_item": "I-1", "work_package": "WP-B", "reassign": 0},
+					{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1},
+				]
+			),
+			test_run="1",
+		)
+
+		self.assertEqual(result["ok"], 2)
+		self.assertEqual(result["skipped"], 0)
+		self.assertEqual(
+			result["lines"],
+			[
+				{"boq_item": "I-1", "status": "OK", "reason": None},
+				{"boq_item": "I-2", "status": "OK", "reason": None},
+			],
+		)
+		packages = {row["work_package"]: row for row in result["packages"]}
+		self.assertEqual(
+			packages,
+			{
+				"WP-A": {
+					"work_package": "WP-A",
+					"before_count": 1,
+					"after_count": 0,
+					"before_amount": 200,
+					"after_amount": 0,
+				},
+				"WP-B": {
+					"work_package": "WP-B",
+					"before_count": 0,
+					"after_count": 2,
+					"before_amount": 0,
+					"after_amount": 300,
+				},
+			},
+		)
+		self.assertEqual(self.frappe.get_all_calls, [])
+		self.assertEqual(len(self.frappe.get_list_calls), 1)
+		self.assertIsNone(self.items[0].work_package)
+		self.assertEqual(self.items[0].save_calls, [])
+		self.recompute.assert_not_called()
+
+	def test_each_line_is_skipped_with_a_stable_reason(self):
+		result = api.assign_work_packages(
+			"BOQ-1",
+			[
+				{"boq_item": "I-2", "work_package": "WP-B", "reassign": 0},
+				{"boq_item": "I-3", "work_package": "WP-A", "reassign": 1},
+				{"boq_item": "I-4", "work_package": "WP-C", "reassign": 0},
+				{"boq_item": "I-1", "work_package": "WP-X", "reassign": 0},
+				{"boq_item": "I-5", "work_package": "WP-A", "reassign": 0},
+				{"boq_item": "I-MISSING", "work_package": "WP-A", "reassign": 0},
+				{"boq_item": "I-6", "work_package": "WP-MISSING", "reassign": 0},
+			],
+			test_run=1,
+		)
+
+		self.assertEqual(result["ok"], 0)
+		self.assertEqual(result["skipped"], 7)
+		self.assertEqual(
+			[row["reason"] for row in result["lines"]],
+			[
+				"WP_ASSIGN_REASSIGN_REQUIRED",
+				"WP_ASSIGN_LINE_NOT_IN_BOQ",
+				"WP_ASSIGN_WP_CLOSED",
+				"WP_ASSIGN_WRONG_PROJECT",
+				"WP_ASSIGN_NOT_PERMITTED",
+				"WP_ASSIGN_LINE_NOT_IN_BOQ",
+				"WP_ASSIGN_WRONG_PROJECT",
+			],
+		)
+		self.assertEqual(self.frappe.permission_calls[0][:3], ("BOQ", "write", "BOQ-1"))
+		self.assertTrue(all(call[0:2] == ("BOQ Item", "write") for call in self.frappe.permission_calls[1:]))
+		self.assertEqual(self.frappe.permission_calls[1][2].name, "I-2")
+
+	def test_productive_run_changes_only_work_package_rolls_up_once_and_comments_once(self):
+		result = api.assign_work_packages(
+			"BOQ-1",
+			[
+				{"boq_item": "I-1", "work_package": "WP-B", "reassign": 0},
+				{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1},
+			],
+			test_run=0,
+		)
+
+		self.assertEqual(result["ok"], 2)
+		self.assertEqual(result["skipped"], 0)
+		self.assertEqual(self.items[0].work_package, "WP-B")
+		self.assertEqual(self.items[1].work_package, "WP-B")
+		self.assertEqual(self.items[0].save_calls, [{"ignore_permissions": True}])
+		self.assertEqual(self.items[1].save_calls, [{"ignore_permissions": True}])
+		self.recompute.assert_called_once_with("BOQ-1")
+		self.assertEqual(self.frappe.flags.boq_skip_rollup, "prior")
+		self.assertEqual(len(self.boq.comments), 1)
+		self.assertIn("WP-B: 2", self.boq.comments[0])
+		self.assertIn("I-1: None -> WP-B", self.boq.comments[0])
+		self.assertIn("I-2: WP-A -> WP-B", self.boq.comments[0])
+
+	def test_whitelist_decorator_and_approved_boq_freeze_contract(self):
+		self.assertTrue(
+			getattr(api.assign_work_packages, "_whitelisted", False)
+			or api.assign_work_packages in getattr(frappe, "whitelisted", ())
+		)
+		fields = dict(self.items[0].__dict__)
+		api.assign_work_packages(
+			"BOQ-1",
+			[{"boq_item": "I-1", "work_package": "WP-A", "reassign": 0}],
+			test_run=0,
+		)
+		for key in ("boq", "planned_amount", "name"):
+			self.assertEqual(getattr(self.items[0], key), fields[key])
+		self.assertEqual(self.items[0].work_package, "WP-A")
+
+	def test_productive_run_with_only_skipped_lines_writes_no_comment_or_rollup(self):
+		result = api.assign_work_packages(
+			"BOQ-1",
+			[{"boq_item": "I-2", "work_package": "WP-B", "reassign": 0}],
+			test_run=0,
+		)
+
+		self.assertEqual(result["ok"], 0)
+		self.assertEqual(result["skipped"], 1)
+		self.recompute.assert_not_called()
+		self.assertEqual(self.boq.comments, [])
+
+	def test_boq_write_denied_raises_permission_error_before_any_reads_or_writes(self):
+		self.frappe.denied.add("BOQ-1")
+		self.items[4].work_package = "WP-A"
+		self.frappe.unreadable.add("I-5")
+
+		for mode in (1, 0):
+			with self.subTest(test_run=mode):
+				with self.assertRaises(frappe.PermissionError):
+					api.assign_work_packages(
+						"BOQ-1",
+						[{"boq_item": "I-1", "work_package": "WP-A", "reassign": 0}],
+						test_run=mode,
+					)
+
+		self.assertEqual(self.frappe.get_doc_calls, [])
+		self.assertEqual(self.frappe.get_list_calls, [])
+		self.assertEqual(self.frappe.get_all_calls, [])
+		self.assertEqual(self.items[0].save_calls, [])
+		self.recompute.assert_not_called()
+		self.assertEqual(self.boq.comments, [])
+
+	def test_duplicate_boq_item_in_payload_raises_validation_error_before_any_work(self):
+		first_copy = self.frappe.get_doc("BOQ Item", "I-1")
+		second_copy = self.frappe.get_doc("BOQ Item", "I-1")
+		self.assertIsNot(first_copy, second_copy)
+		self.frappe.get_doc_calls.clear()
+
+		with self.assertRaisesRegex(frappe.ValidationError, "WP_ASSIGN_DUPLICATE_LINE"):
+			api.assign_work_packages(
+				"BOQ-1",
+				[
+					{"boq_item": "I-1", "work_package": "WP-A", "reassign": 0},
+					{"boq_item": "I-1", "work_package": "WP-B", "reassign": 1},
+				],
+				test_run=0,
+			)
+
+		self.assertEqual(self.frappe.get_doc_calls, [])
+		self.assertEqual(self.frappe.get_list_calls, [])
+		self.assertEqual(self.items[0].save_calls, [])
+		self.recompute.assert_not_called()
+		self.assertEqual(self.boq.comments, [])
+
+	def test_save_failure_rolls_back_line_savepoint_marks_skipped_and_saves_others(self):
+		self.items[1].save_error = RuntimeError("locked by freeze")
+
+		result = api.assign_work_packages(
+			"BOQ-1",
+			[
+				{"boq_item": "I-1", "work_package": "WP-B", "reassign": 0},
+				{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1},
+				{"boq_item": "I-4", "work_package": "WP-A", "reassign": 0},
+			],
+			test_run=0,
+		)
+
+		self.assertEqual(result["ok"], 2)
+		self.assertEqual(result["skipped"], 1)
+		self.assertEqual(result["lines"][0], {"boq_item": "I-1", "status": "OK", "reason": None})
+		self.assertEqual(result["lines"][1]["boq_item"], "I-2")
+		self.assertEqual(result["lines"][1]["status"], "SKIPPED")
+		self.assertIn("WP_ASSIGN_SAVE_FAILED", result["lines"][1]["reason"])
+		self.assertIn("locked by freeze", result["lines"][1]["reason"])
+		self.assertEqual(result["lines"][2], {"boq_item": "I-4", "status": "OK", "reason": None})
+		self.assertEqual(self.items[0].work_package, "WP-B")
+		self.assertEqual(self.items[1].work_package, "WP-A")
+		self.assertEqual(self.items[3].work_package, "WP-A")
+		self.assertEqual(len(self.frappe.db.savepoints), 3)
+		self.assertEqual(self.frappe.db.rollbacks, [self.frappe.db.savepoints[1]])
+		self.recompute.assert_called_once_with("BOQ-1")
+		self.assertEqual(len(self.boq.comments), 1)
+		self.assertIn("I-1: None -> WP-B", self.boq.comments[0])
+		self.assertIn("I-4: None -> WP-A", self.boq.comments[0])
+		self.assertNotIn("I-2", self.boq.comments[0])
+
+	def test_invalid_input_shape_raises_validation_error_before_any_work(self):
+		bad_payloads = [
+			None,
+			{},
+			"not-json",
+			json.dumps({"boq_item": "I-1", "work_package": "WP-A"}),
+			["I-1"],
+			[{"boq_item": "I-1"}],
+			[{"boq_item": "", "work_package": "WP-A"}],
+			[{"boq_item": "I-1", "work_package": ""}],
+			[{"boq_item": 123, "work_package": "WP-A"}],
+			[{"boq_item": "I-1", "work_package": None}],
+			[{"boq_item": "I-1", "work_package": "WP-A", "reassign": 2}],
+			[{"boq_item": "I-1", "work_package": "WP-A", "reassign": "yes"}],
+			[{"boq_item": "I-1", "work_package": "WP-A", "reassign": None}],
+		]
+		for payload in bad_payloads:
+			with self.subTest(payload=payload):
+				with self.assertRaisesRegex(frappe.ValidationError, "WP_ASSIGN_BAD_INPUT"):
+					api.assign_work_packages("BOQ-1", payload, test_run=1)
+
+		self.assertEqual(self.frappe.get_doc_calls, [])
+		self.assertEqual(self.frappe.get_list_calls, [])
+		self.recompute.assert_not_called()

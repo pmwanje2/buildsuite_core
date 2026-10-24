@@ -8,7 +8,7 @@ Reads go through the standard data adapter; only these mutations need the API.
 
 import frappe
 from frappe import _
-from frappe.utils import flt, today
+from frappe.utils import cint, flt, today
 
 from buildsuite_core.buildsuite_core.doctype.boq.boq_rollup import recompute_boq
 from buildsuite_core.permissions.setup import BOQ_APPROVE_ROLES
@@ -287,7 +287,13 @@ def create_revision(boq: str, source_sco: str | None = None, title: str | None =
 
 
 @frappe.whitelist()
-def clone_boq(from_project: str, to_project: str, from_work_package: str | None = None, to_work_package: str | None = None, title: str | None = None):
+def clone_boq(
+	from_project: str,
+	to_project: str,
+	from_work_package: str | None = None,
+	to_work_package: str | None = None,
+	title: str | None = None,
+):
 	"""project->project: a new Draft BOQ on the target. wp->wp (same project):
 	retag the source WP's lines onto the project's latest BOQ."""
 	if not frappe.has_permission("BOQ", "create"):
@@ -399,3 +405,188 @@ def import_template(boq: str, estimate_template: str):
 		frappe.flags.boq_skip_rollup = False
 	recompute_boq(boq)
 	return {"boq": boq, "seeded": seeded}
+
+
+# --- work package mass assignment -----------------------------------------
+
+_CLOSED_WP_STATUSES = ("Completed",)
+
+
+def _get_doc_or_none(doctype: str, name: str | None):
+	if not name:
+		return None
+	missing = getattr(frappe, "DoesNotExistError", LookupError)
+	try:
+		return frappe.get_doc(doctype, name)
+	except missing:
+		return None
+
+
+def _raise_assignment_validation(message):
+	frappe.throw(_("WP_ASSIGN_BAD_INPUT: {0}").format(message), frappe.ValidationError)
+
+
+def _normalise_assignments(assignments):
+	if isinstance(assignments, str):
+		try:
+			assignments = frappe.parse_json(assignments)
+		except Exception as exc:
+			_raise_assignment_validation(str(exc))
+
+	if not isinstance(assignments, list):
+		_raise_assignment_validation("assignments must be a list")
+
+	seen = set()
+	for index, row in enumerate(assignments):
+		if not isinstance(row, dict):
+			_raise_assignment_validation(f"line {index + 1} must be an object")
+		item_name = row.get("boq_item")
+		target_wp = row.get("work_package")
+		if not isinstance(item_name, str) or not item_name.strip():
+			_raise_assignment_validation(f"line {index + 1} boq_item must be a string")
+		if not isinstance(target_wp, str) or not target_wp.strip():
+			_raise_assignment_validation(f"line {index + 1} work_package must be a string")
+		if item_name in seen:
+			frappe.throw(
+				_("WP_ASSIGN_DUPLICATE_LINE: {0}").format(item_name),
+				frappe.ValidationError,
+			)
+		seen.add(item_name)
+		reassign = row.get("reassign", 0)
+		if not (isinstance(reassign, int) and reassign in (0, 1)):
+			_raise_assignment_validation(f"line {index + 1} reassign must be 0, 1, or bool")
+	return assignments
+
+
+def _record_assignment(mapping, touched_wps, item_name, old_wp, target_wp):
+	mapping[item_name] = target_wp
+	for work_package in (old_wp, target_wp):
+		if work_package and work_package not in touched_wps:
+			touched_wps.append(work_package)
+
+
+@frappe.whitelist()
+def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
+	"""SAP PS mass change / Fiori mass edit for BOQ Item.work_package."""
+	_require_write(boq)
+	assignments = _normalise_assignments(assignments)
+	boq_doc = frappe.get_doc("BOQ", boq)
+	existing_rows = frappe.get_list(
+		"BOQ Item",
+		filters={"boq": boq_doc.name},
+		fields=["name", "work_package", "planned_amount"],
+		limit_page_length=0,
+	)
+	before_wp = {row.name: row.work_package for row in existing_rows}
+	amounts = {row.name: flt(row.planned_amount) for row in existing_rows}
+	after_wp = dict(before_wp)
+
+	lines = []
+	valid = []
+	touched_wps = []
+
+	for row in assignments:
+		item_name = row.get("boq_item")
+		target_wp = row.get("work_package")
+		reassign = cint(row.get("reassign", 0))
+		item = _get_doc_or_none("BOQ Item", item_name)
+		wp = _get_doc_or_none("Work Package", target_wp)
+		current_wp = item.work_package if item else None
+
+		if not item:
+			reason = "WP_ASSIGN_LINE_NOT_IN_BOQ"
+		elif not frappe.has_permission("BOQ Item", "write", doc=item):
+			reason = "WP_ASSIGN_NOT_PERMITTED"
+		elif item.boq != boq_doc.name:
+			reason = "WP_ASSIGN_LINE_NOT_IN_BOQ"
+		elif not wp or wp.project != boq_doc.project:
+			reason = "WP_ASSIGN_WRONG_PROJECT"
+		elif wp.status in _CLOSED_WP_STATUSES:
+			reason = "WP_ASSIGN_WP_CLOSED"
+		elif current_wp and current_wp != target_wp and not reassign:
+			reason = "WP_ASSIGN_REASSIGN_REQUIRED"
+		else:
+			reason = None
+
+		if reason:
+			lines.append({"boq_item": item_name, "status": "SKIPPED", "reason": reason})
+			continue
+
+		valid.append(
+			{
+				"item": item,
+				"target_wp": target_wp,
+				"old_wp": current_wp,
+				"line": {"boq_item": item_name, "status": "OK", "reason": None},
+			}
+		)
+		lines.append(valid[-1]["line"])
+
+	if cint(test_run):
+		for entry in valid:
+			item = entry["item"]
+			_record_assignment(after_wp, touched_wps, item.name, entry["old_wp"], entry["target_wp"])
+	elif valid:
+		prior_skip = frappe.flags.get("boq_skip_rollup")
+		frappe.flags.boq_skip_rollup = True
+		saved = []
+		try:
+			for index, entry in enumerate(valid, start=1):
+				item = entry["item"]
+				target_wp = entry["target_wp"]
+				savepoint = f"boq_assign_{index}"
+				frappe.db.savepoint(savepoint)
+				try:
+					item.work_package = target_wp
+					item.save(ignore_permissions=True)
+				except Exception as exc:
+					frappe.db.rollback(save_point=savepoint)
+					entry["line"].update(
+						status="SKIPPED",
+						reason=f"WP_ASSIGN_SAVE_FAILED: {exc}",
+					)
+					continue
+				saved.append(entry)
+				_record_assignment(after_wp, touched_wps, item.name, entry["old_wp"], target_wp)
+		finally:
+			frappe.flags.boq_skip_rollup = prior_skip
+
+		if saved:
+			recompute_boq(boq_doc.name)
+			counts = {}
+			for entry in saved:
+				target_wp = entry["target_wp"]
+				counts[target_wp] = counts.get(target_wp, 0) + 1
+			changes = "\n".join(
+				_("{0}: {1} -> {2}").format(entry["item"].name, entry["old_wp"], entry["target_wp"])
+				for entry in saved
+			)
+			count_summary = ", ".join(
+				_("{0}: {1}").format(work_package, count) for work_package, count in counts.items()
+			)
+			boq_doc.add_comment(
+				"Comment",
+				_("Assigned work packages:\n{0}\n\nWork Package counts: {1}").format(changes, count_summary),
+			)
+
+	packages = []
+	for wp_name in touched_wps:
+		before_items = [name for name, current in before_wp.items() if current == wp_name]
+		after_items = [name for name, current in after_wp.items() if current == wp_name]
+		packages.append(
+			{
+				"work_package": wp_name,
+				"before_count": len(before_items),
+				"after_count": len(after_items),
+				"before_amount": sum(amounts.get(name, 0.0) for name in before_items),
+				"after_amount": sum(amounts.get(name, 0.0) for name in after_items),
+			}
+		)
+
+	ok_count = sum(line["status"] == "OK" for line in lines)
+	return {
+		"lines": lines,
+		"packages": packages,
+		"ok": ok_count,
+		"skipped": len(lines) - ok_count,
+	}
