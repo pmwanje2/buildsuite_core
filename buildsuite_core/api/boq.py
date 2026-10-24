@@ -493,23 +493,34 @@ def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
 		wp = _get_doc_or_none("Work Package", target_wp)
 		current_wp = item.work_package if item else None
 
-		if not item:
+		if not item or item.boq != boq_doc.name:
 			reason = "WP_ASSIGN_LINE_NOT_IN_BOQ"
+			message = _("This BOQ line is not in BOQ {0}.").format(boq_doc.name)
 		elif not frappe.has_permission("BOQ Item", "write", doc=item):
 			reason = "WP_ASSIGN_NOT_PERMITTED"
-		elif item.boq != boq_doc.name:
-			reason = "WP_ASSIGN_LINE_NOT_IN_BOQ"
+			message = _("You don't have permission to change the work package on this BOQ line.")
 		elif not wp or wp.project != boq_doc.project:
 			reason = "WP_ASSIGN_WRONG_PROJECT"
+			message = _("Work package {0} does not belong to project {1}.").format(target_wp, boq_doc.project)
 		elif wp.status in _CLOSED_WP_STATUSES:
 			reason = "WP_ASSIGN_WP_CLOSED"
+			message = _("Work package {0} is closed and cannot receive BOQ lines.").format(target_wp)
 		elif current_wp and current_wp != target_wp and not reassign:
 			reason = "WP_ASSIGN_REASSIGN_REQUIRED"
+			message = _("This line is already in work package {0}; confirm reassignment.").format(current_wp)
 		else:
 			reason = None
+			message = None
 
 		if reason:
-			lines.append({"boq_item": item_name, "status": "SKIPPED", "reason": reason})
+			lines.append(
+				{
+					"boq_item": item_name,
+					"status": "SKIPPED",
+					"reason": reason,
+					"message": message,
+				}
+			)
 			continue
 
 		valid.append(
@@ -535,15 +546,21 @@ def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
 				item = entry["item"]
 				target_wp = entry["target_wp"]
 				savepoint = f"boq_assign_{index}"
+				local = getattr(frappe, "local", None)
+				message_log = getattr(local, "message_log", None)
+				prior_log_len = len(message_log) if isinstance(message_log, list) else None
 				frappe.db.savepoint(savepoint)
 				try:
 					item.work_package = target_wp
 					item.save(ignore_permissions=True)
 				except Exception as exc:
 					frappe.db.rollback(save_point=savepoint)
+					if prior_log_len is not None and isinstance(getattr(local, "message_log", None), list):
+						del local.message_log[prior_log_len:]
 					entry["line"].update(
 						status="SKIPPED",
-						reason=f"WP_ASSIGN_SAVE_FAILED: {exc}",
+						reason="WP_ASSIGN_SAVE_FAILED",
+						message=_("Could not save work package on this BOQ line: {0}").format(exc),
 					)
 					continue
 				saved.append(entry)
@@ -558,7 +575,11 @@ def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
 				target_wp = entry["target_wp"]
 				counts[target_wp] = counts.get(target_wp, 0) + 1
 			changes = "\n".join(
-				_("{0}: {1} -> {2}").format(entry["item"].name, entry["old_wp"], entry["target_wp"])
+				_("{0}: {1} -> {2}").format(
+					entry["item"].name,
+					entry["old_wp"] or _("unassigned"),
+					entry["target_wp"],
+				)
 				for entry in saved
 			)
 			count_summary = ", ".join(
