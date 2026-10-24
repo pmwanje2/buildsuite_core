@@ -4,36 +4,12 @@
 revisions, approve-supersede and actuals recompute."""
 
 import json
-import sys
-import types
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
-try:
-	import frappe
-except ModuleNotFoundError:
-	frappe = types.ModuleType("frappe")
-	frappe.__path__ = []
-	frappe._ = lambda value: value
-	frappe.DoesNotExistError = LookupError
+from buildsuite_core.tests._boq_stub import AssignmentDoc, AssignmentFrappe, ensure_frappe_stub
 
-	def _whitelist():
-		def _mark(function):
-			function._whitelisted = True
-			return function
-
-		return _mark
-
-	frappe.whitelist = _whitelist
-	frappe.tests = types.ModuleType("frappe.tests")
-	frappe.tests.UnitTestCase = unittest.TestCase
-	frappe_utils = types.ModuleType("frappe.utils")
-	frappe_utils.flt = lambda value: float(value or 0)
-	frappe_utils.today = lambda: "2026-10-24"
-	sys.modules["frappe"] = frappe
-	sys.modules["frappe.tests"] = frappe.tests
-	sys.modules["frappe.utils"] = frappe_utils
+frappe = ensure_frappe_stub()
 
 from buildsuite_core.api import boq as api
 from buildsuite_core.tests.base import BuildSuiteTestCase
@@ -266,8 +242,18 @@ class TestBOQ(BuildSuiteTestCase):
 				"template_code": f"TPL-{frappe.generate_hash(length=5)}",
 				"template_name": "Tpl",
 				"rows": [
-					{"group_name": "Civil", "line_type": "Assembly", "assembly": asm.name, "placeholder_qty": 4},
-					{"group_name": "Civil", "line_type": "Resource", "resource": rm.name, "placeholder_qty": 3},
+					{
+						"group_name": "Civil",
+						"line_type": "Assembly",
+						"assembly": asm.name,
+						"placeholder_qty": 4,
+					},
+					{
+						"group_name": "Civil",
+						"line_type": "Resource",
+						"resource": rm.name,
+						"placeholder_qty": 3,
+					},
 				],
 			}
 		).insert(ignore_permissions=True)
@@ -431,9 +417,7 @@ class TestBOQ(BuildSuiteTestCase):
 
 		it = self._item(b.name, g.name, 1, 0, assembly=asm.name, driving_qty=1)
 		api.explode_item(it.name)
-		subs = frappe.get_all(
-			"BOQ Sub Item", filters={"boq_item": it.name}, fields=["rate_master", "amount"]
-		)
+		subs = frappe.get_all("BOQ Sub Item", filters={"boq_item": it.name}, fields=["rate_master", "amount"])
 		self.assertEqual(len(subs), 2)
 		by_resource = {s.rate_master: s for s in subs}
 		self.assertEqual(by_resource[r_nos.name].amount, 200)
@@ -489,93 +473,22 @@ class TestBOQ(BuildSuiteTestCase):
 		self.assertEqual(by_wp[wp_b.name].planned_amount, 1000)
 
 
-class _AssignmentDoc:
-	def __init__(self, **values):
-		self.__dict__.update(values)
-		self.save_calls = []
-		self.comments = []
-
-	def get(self, key, default=None):
-		return getattr(self, key, default)
-
-	def save(self, **kwargs):
-		self.save_calls.append(kwargs)
-
-	def add_comment(self, comment_type, content):
-		self.comments.append(content)
-
-
-class _AssignmentFlags(dict):
-	def __getattr__(self, key):
-		return self.get(key)
-
-	def __setattr__(self, key, value):
-		self[key] = value
-
-
-class _AssignmentFrappe:
-	def __init__(self, boq, items, work_packages, denied=()):
-		self.boq = boq
-		self.items = {item.name: item for item in items}
-		self.work_packages = {work_package.name: work_package for work_package in work_packages}
-		self.denied = set(denied)
-		self.permission_calls = []
-		self.flags = _AssignmentFlags()
-		self.DoesNotExistError = getattr(frappe, "DoesNotExistError", LookupError)
-
-	def get_doc(self, doctype, name):
-		if doctype == "BOQ":
-			return self.boq
-		if doctype == "BOQ Item":
-			if name not in self.items:
-				raise self.DoesNotExistError(name)
-			return self.items[name]
-		if doctype == "Work Package":
-			if name not in self.work_packages:
-				raise self.DoesNotExistError(name)
-			return self.work_packages[name]
-		raise AssertionError((doctype, name))
-
-	def get_all(self, doctype, filters=None, fields=None, **kwargs):
-		if doctype != "BOQ Item":
-			raise AssertionError((doctype, filters, fields, kwargs))
-		return [
-			SimpleNamespace(
-				name=item.name,
-				work_package=item.work_package,
-				planned_amount=item.planned_amount,
-			)
-			for item in self.items.values()
-			if item.boq == filters.get("boq")
-		]
-
-	def has_permission(self, doctype, ptype, doc=None, **kwargs):
-		self.permission_calls.append((doctype, ptype, doc, kwargs))
-		return doc.name not in self.denied
-
-	def parse_json(self, value):
-		return json.loads(value)
-
-	def get_meta(self, doctype):
-		assert doctype == "Work Package"
-		return SimpleNamespace(get_field=lambda field: SimpleNamespace(options="Planned\nIn Progress\nOn Hold\nCompleted"))
-
-
 class TestAssignWorkPackages(unittest.TestCase):
 	def setUp(self):
-		self.boq = _AssignmentDoc(doctype="BOQ", name="BOQ-1", project="PROJ-1", status="Approved")
-		self.wp_a = _AssignmentDoc(name="WP-A", project="PROJ-1", status="Planned")
-		self.wp_b = _AssignmentDoc(name="WP-B", project="PROJ-1", status="Planned")
-		self.wp_closed = _AssignmentDoc(name="WP-C", project="PROJ-1", status="Completed")
-		self.wp_other = _AssignmentDoc(name="WP-X", project="PROJ-2", status="Planned")
+		self.boq = AssignmentDoc(doctype="BOQ", name="BOQ-1", project="PROJ-1", status="Approved")
+		self.wp_a = AssignmentDoc(name="WP-A", project="PROJ-1", status="Planned")
+		self.wp_b = AssignmentDoc(name="WP-B", project="PROJ-1", status="Planned")
+		self.wp_closed = AssignmentDoc(name="WP-C", project="PROJ-1", status="Completed")
+		self.wp_other = AssignmentDoc(name="WP-X", project="PROJ-2", status="Planned")
 		self.items = [
-			_AssignmentDoc(name="I-1", boq="BOQ-1", work_package=None, planned_amount=100),
-			_AssignmentDoc(name="I-2", boq="BOQ-1", work_package="WP-A", planned_amount=200),
-			_AssignmentDoc(name="I-3", boq="BOQ-OTHER", work_package=None, planned_amount=300),
-			_AssignmentDoc(name="I-4", boq="BOQ-1", work_package=None, planned_amount=400),
-			_AssignmentDoc(name="I-5", boq="BOQ-1", work_package=None, planned_amount=500),
+			AssignmentDoc(name="I-1", boq="BOQ-1", work_package=None, planned_amount=100),
+			AssignmentDoc(name="I-2", boq="BOQ-1", work_package="WP-A", planned_amount=200),
+			AssignmentDoc(name="I-3", boq="BOQ-OTHER", work_package=None, planned_amount=300),
+			AssignmentDoc(name="I-4", boq="BOQ-1", work_package=None, planned_amount=400),
+			AssignmentDoc(name="I-5", boq="BOQ-1", work_package=None, planned_amount=500),
+			AssignmentDoc(name="I-6", boq="BOQ-1", work_package=None, planned_amount=600),
 		]
-		self.frappe = _AssignmentFrappe(
+		self.frappe = AssignmentFrappe(
 			self.boq,
 			self.items,
 			[self.wp_a, self.wp_b, self.wp_closed, self.wp_other],
@@ -588,6 +501,8 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.addCleanup(patch.stopall)
 
 	def test_test_run_accepts_json_and_returns_before_after_package_totals_without_writes(self):
+		self.items[4].work_package = "WP-A"
+		self.frappe.unreadable.add("I-5")
 		result = api.assign_work_packages(
 			"BOQ-1",
 			json.dumps(
@@ -628,6 +543,8 @@ class TestAssignWorkPackages(unittest.TestCase):
 				},
 			},
 		)
+		self.assertEqual(self.frappe.get_all_calls, [])
+		self.assertEqual(len(self.frappe.get_list_calls), 1)
 		self.assertIsNone(self.items[0].work_package)
 		self.assertEqual(self.items[0].save_calls, [])
 		self.recompute.assert_not_called()
@@ -642,7 +559,7 @@ class TestAssignWorkPackages(unittest.TestCase):
 				{"boq_item": "I-1", "work_package": "WP-X", "reassign": 0},
 				{"boq_item": "I-5", "work_package": "WP-A", "reassign": 0},
 				{"boq_item": "I-MISSING", "work_package": "WP-A", "reassign": 0},
-				{"boq_item": "I-1", "work_package": "WP-MISSING", "reassign": 0},
+				{"boq_item": "I-6", "work_package": "WP-MISSING", "reassign": 0},
 			],
 			test_run=1,
 		)
@@ -661,8 +578,9 @@ class TestAssignWorkPackages(unittest.TestCase):
 				"WP_ASSIGN_WRONG_PROJECT",
 			],
 		)
-		self.assertTrue(all(call[0:2] == ("BOQ Item", "write") for call in self.frappe.permission_calls))
-		self.assertIs(self.frappe.permission_calls[0][2], self.items[1])
+		self.assertEqual(self.frappe.permission_calls[0][:3], ("BOQ", "write", "BOQ-1"))
+		self.assertTrue(all(call[0:2] == ("BOQ Item", "write") for call in self.frappe.permission_calls[1:]))
+		self.assertEqual(self.frappe.permission_calls[1][2].name, "I-2")
 
 	def test_productive_run_changes_only_work_package_rolls_up_once_and_comments_once(self):
 		result = api.assign_work_packages(
@@ -684,7 +602,8 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.assertEqual(self.frappe.flags.boq_skip_rollup, "prior")
 		self.assertEqual(len(self.boq.comments), 1)
 		self.assertIn("WP-B: 2", self.boq.comments[0])
-
+		self.assertIn("I-1: None -> WP-B", self.boq.comments[0])
+		self.assertIn("I-2: WP-A -> WP-B", self.boq.comments[0])
 
 	def test_whitelist_decorator_and_approved_boq_freeze_contract(self):
 		self.assertTrue(
@@ -713,4 +632,102 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.recompute.assert_not_called()
 		self.assertEqual(self.boq.comments, [])
 
+	def test_boq_write_denied_raises_permission_error_before_any_reads_or_writes(self):
+		self.frappe.denied.add("BOQ-1")
+		self.items[4].work_package = "WP-A"
+		self.frappe.unreadable.add("I-5")
 
+		for mode in (1, 0):
+			with self.subTest(test_run=mode):
+				with self.assertRaises(frappe.PermissionError):
+					api.assign_work_packages(
+						"BOQ-1",
+						[{"boq_item": "I-1", "work_package": "WP-A", "reassign": 0}],
+						test_run=mode,
+					)
+
+		self.assertEqual(self.frappe.get_doc_calls, [])
+		self.assertEqual(self.frappe.get_list_calls, [])
+		self.assertEqual(self.frappe.get_all_calls, [])
+		self.assertEqual(self.items[0].save_calls, [])
+		self.recompute.assert_not_called()
+		self.assertEqual(self.boq.comments, [])
+
+	def test_duplicate_boq_item_in_payload_raises_validation_error_before_any_work(self):
+		first_copy = self.frappe.get_doc("BOQ Item", "I-1")
+		second_copy = self.frappe.get_doc("BOQ Item", "I-1")
+		self.assertIsNot(first_copy, second_copy)
+		self.frappe.get_doc_calls.clear()
+
+		with self.assertRaisesRegex(frappe.ValidationError, "WP_ASSIGN_DUPLICATE_LINE"):
+			api.assign_work_packages(
+				"BOQ-1",
+				[
+					{"boq_item": "I-1", "work_package": "WP-A", "reassign": 0},
+					{"boq_item": "I-1", "work_package": "WP-B", "reassign": 1},
+				],
+				test_run=0,
+			)
+
+		self.assertEqual(self.frappe.get_doc_calls, [])
+		self.assertEqual(self.frappe.get_list_calls, [])
+		self.assertEqual(self.items[0].save_calls, [])
+		self.recompute.assert_not_called()
+		self.assertEqual(self.boq.comments, [])
+
+	def test_save_failure_rolls_back_line_savepoint_marks_skipped_and_saves_others(self):
+		self.items[1].save_error = RuntimeError("locked by freeze")
+
+		result = api.assign_work_packages(
+			"BOQ-1",
+			[
+				{"boq_item": "I-1", "work_package": "WP-B", "reassign": 0},
+				{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1},
+				{"boq_item": "I-4", "work_package": "WP-A", "reassign": 0},
+			],
+			test_run=0,
+		)
+
+		self.assertEqual(result["ok"], 2)
+		self.assertEqual(result["skipped"], 1)
+		self.assertEqual(result["lines"][0], {"boq_item": "I-1", "status": "OK", "reason": None})
+		self.assertEqual(result["lines"][1]["boq_item"], "I-2")
+		self.assertEqual(result["lines"][1]["status"], "SKIPPED")
+		self.assertIn("WP_ASSIGN_SAVE_FAILED", result["lines"][1]["reason"])
+		self.assertIn("locked by freeze", result["lines"][1]["reason"])
+		self.assertEqual(result["lines"][2], {"boq_item": "I-4", "status": "OK", "reason": None})
+		self.assertEqual(self.items[0].work_package, "WP-B")
+		self.assertEqual(self.items[1].work_package, "WP-A")
+		self.assertEqual(self.items[3].work_package, "WP-A")
+		self.assertEqual(len(self.frappe.db.savepoints), 3)
+		self.assertEqual(self.frappe.db.rollbacks, [self.frappe.db.savepoints[1]])
+		self.recompute.assert_called_once_with("BOQ-1")
+		self.assertEqual(len(self.boq.comments), 1)
+		self.assertIn("I-1: None -> WP-B", self.boq.comments[0])
+		self.assertIn("I-4: None -> WP-A", self.boq.comments[0])
+		self.assertNotIn("I-2", self.boq.comments[0])
+
+	def test_invalid_input_shape_raises_validation_error_before_any_work(self):
+		bad_payloads = [
+			None,
+			{},
+			"not-json",
+			json.dumps({"boq_item": "I-1", "work_package": "WP-A"}),
+			["I-1"],
+			[{"boq_item": "I-1"}],
+			[{"boq_item": "", "work_package": "WP-A"}],
+			[{"boq_item": "I-1", "work_package": ""}],
+			[{"boq_item": 123, "work_package": "WP-A"}],
+			[{"boq_item": "I-1", "work_package": None}],
+			[{"boq_item": "I-1", "work_package": "WP-A", "reassign": 2}],
+			[{"boq_item": "I-1", "work_package": "WP-A", "reassign": "yes"}],
+			[{"boq_item": "I-1", "work_package": "WP-A", "reassign": None}],
+		]
+		for payload in bad_payloads:
+			with self.subTest(payload=payload):
+				with self.assertRaisesRegex(frappe.ValidationError, "WP_ASSIGN_BAD_INPUT"):
+					api.assign_work_packages("BOQ-1", payload, test_run=1)
+
+		self.assertEqual(self.frappe.get_doc_calls, [])
+		self.assertEqual(self.frappe.get_list_calls, [])
+		self.recompute.assert_not_called()
