@@ -550,37 +550,90 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.recompute.assert_not_called()
 
 	def test_each_line_is_skipped_with_a_stable_reason(self):
-		result = api.assign_work_packages(
-			"BOQ-1",
-			[
-				{"boq_item": "I-2", "work_package": "WP-B", "reassign": 0},
-				{"boq_item": "I-3", "work_package": "WP-A", "reassign": 1},
-				{"boq_item": "I-4", "work_package": "WP-C", "reassign": 0},
-				{"boq_item": "I-1", "work_package": "WP-X", "reassign": 0},
-				{"boq_item": "I-5", "work_package": "WP-A", "reassign": 0},
-				{"boq_item": "I-MISSING", "work_package": "WP-A", "reassign": 0},
-				{"boq_item": "I-6", "work_package": "WP-MISSING", "reassign": 0},
-			],
-			test_run=1,
-		)
+		self.frappe.denied.add("I-3")
+		translated = []
+		with patch.object(api, "_", side_effect=lambda value: (translated.append(value), value)[1]):
+			result = api.assign_work_packages(
+				"BOQ-1",
+				[
+					{"boq_item": "I-2", "work_package": "WP-B", "reassign": 0},
+					{"boq_item": "I-3", "work_package": "WP-A", "reassign": 1},
+					{"boq_item": "I-4", "work_package": "WP-C", "reassign": 0},
+					{"boq_item": "I-1", "work_package": "WP-X", "reassign": 0},
+					{"boq_item": "I-5", "work_package": "WP-A", "reassign": 0},
+					{"boq_item": "I-MISSING", "work_package": "WP-A", "reassign": 0},
+					{"boq_item": "I-6", "work_package": "WP-MISSING", "reassign": 0},
+				],
+				test_run=1,
+			)
 
 		self.assertEqual(result["ok"], 0)
 		self.assertEqual(result["skipped"], 7)
 		self.assertEqual(
-			[row["reason"] for row in result["lines"]],
+			result["lines"],
 			[
-				"WP_ASSIGN_REASSIGN_REQUIRED",
-				"WP_ASSIGN_LINE_NOT_IN_BOQ",
-				"WP_ASSIGN_WP_CLOSED",
-				"WP_ASSIGN_WRONG_PROJECT",
-				"WP_ASSIGN_NOT_PERMITTED",
-				"WP_ASSIGN_LINE_NOT_IN_BOQ",
-				"WP_ASSIGN_WRONG_PROJECT",
+				{
+					"boq_item": "I-2",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_REASSIGN_REQUIRED",
+					"message": "This line is already in work package WP-A; confirm reassignment.",
+				},
+				{
+					"boq_item": "I-3",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_LINE_NOT_IN_BOQ",
+					"message": "This BOQ line is not in BOQ BOQ-1.",
+				},
+				{
+					"boq_item": "I-4",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_WP_CLOSED",
+					"message": "Work package WP-C is closed and cannot receive BOQ lines.",
+				},
+				{
+					"boq_item": "I-1",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_WRONG_PROJECT",
+					"message": "Work package WP-X does not belong to project PROJ-1.",
+				},
+				{
+					"boq_item": "I-5",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_NOT_PERMITTED",
+					"message": "You don't have permission to change the work package on this BOQ line.",
+				},
+				{
+					"boq_item": "I-MISSING",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_LINE_NOT_IN_BOQ",
+					"message": "This BOQ line is not in BOQ BOQ-1.",
+				},
+				{
+					"boq_item": "I-6",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_WRONG_PROJECT",
+					"message": "Work package WP-MISSING does not belong to project PROJ-1.",
+				},
 			],
 		)
 		self.assertEqual(self.frappe.permission_calls[0][:3], ("BOQ", "write", "BOQ-1"))
 		self.assertTrue(all(call[0:2] == ("BOQ Item", "write") for call in self.frappe.permission_calls[1:]))
-		self.assertEqual(self.frappe.permission_calls[1][2].name, "I-2")
+		self.assertEqual(
+			[call[2].name for call in self.frappe.permission_calls[1:]],
+			["I-2", "I-4", "I-1", "I-5", "I-6"],
+		)
+		self.assertEqual(
+			translated,
+			[
+				"This line is already in work package {0}; confirm reassignment.",
+				"This BOQ line is not in BOQ {0}.",
+				"Work package {0} is closed and cannot receive BOQ lines.",
+				"Work package {0} does not belong to project {1}.",
+				"You don't have permission to change the work package on this BOQ line.",
+				"This BOQ line is not in BOQ {0}.",
+				"Work package {0} does not belong to project {1}.",
+			],
+		)
 
 	def test_productive_run_changes_only_work_package_rolls_up_once_and_comments_once(self):
 		result = api.assign_work_packages(
@@ -602,8 +655,9 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.assertEqual(self.frappe.flags.boq_skip_rollup, "prior")
 		self.assertEqual(len(self.boq.comments), 1)
 		self.assertIn("WP-B: 2", self.boq.comments[0])
-		self.assertIn("I-1: None -> WP-B", self.boq.comments[0])
+		self.assertIn("I-1: unassigned -> WP-B", self.boq.comments[0])
 		self.assertIn("I-2: WP-A -> WP-B", self.boq.comments[0])
+		self.assertNotIn("None", self.boq.comments[0])
 
 	def test_whitelist_decorator_and_approved_boq_freeze_contract(self):
 		self.assertTrue(
@@ -676,7 +730,8 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.assertEqual(self.boq.comments, [])
 
 	def test_save_failure_rolls_back_line_savepoint_marks_skipped_and_saves_others(self):
-		self.items[1].save_error = RuntimeError("locked by freeze")
+		self.items[1].save_error = frappe.ValidationError("<b>locked by freeze</b>")
+		self.frappe.local.message_log = ["prior message"]
 
 		result = api.assign_work_packages(
 			"BOQ-1",
@@ -691,21 +746,98 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.assertEqual(result["ok"], 2)
 		self.assertEqual(result["skipped"], 1)
 		self.assertEqual(result["lines"][0], {"boq_item": "I-1", "status": "OK", "reason": None})
-		self.assertEqual(result["lines"][1]["boq_item"], "I-2")
-		self.assertEqual(result["lines"][1]["status"], "SKIPPED")
-		self.assertIn("WP_ASSIGN_SAVE_FAILED", result["lines"][1]["reason"])
-		self.assertIn("locked by freeze", result["lines"][1]["reason"])
+		self.assertEqual(
+			result["lines"][1],
+			{
+				"boq_item": "I-2",
+				"status": "SKIPPED",
+				"reason": "WP_ASSIGN_SAVE_FAILED",
+				"message": "locked by freeze",
+			},
+		)
 		self.assertEqual(result["lines"][2], {"boq_item": "I-4", "status": "OK", "reason": None})
 		self.assertEqual(self.items[0].work_package, "WP-B")
 		self.assertEqual(self.items[1].work_package, "WP-A")
 		self.assertEqual(self.items[3].work_package, "WP-A")
 		self.assertEqual(len(self.frappe.db.savepoints), 3)
 		self.assertEqual(self.frappe.db.rollbacks, [self.frappe.db.savepoints[1]])
+		self.assertEqual(self.frappe.local.message_log, ["prior message"])
+		self.assertEqual(self.frappe.error_logs, [])
 		self.recompute.assert_called_once_with("BOQ-1")
 		self.assertEqual(len(self.boq.comments), 1)
-		self.assertIn("I-1: None -> WP-B", self.boq.comments[0])
-		self.assertIn("I-4: None -> WP-A", self.boq.comments[0])
+		self.assertIn("I-1: unassigned -> WP-B", self.boq.comments[0])
+		self.assertIn("I-4: unassigned -> WP-A", self.boq.comments[0])
 		self.assertNotIn("I-2", self.boq.comments[0])
+		self.assertNotIn("None", self.boq.comments[0])
+
+	def test_non_validation_save_failure_hides_error_and_logs_traceback(self):
+		error_text = "(1205, 'Lock wait timeout exceeded; try restarting transaction')"
+		self.items[1].save_error = RuntimeError(error_text)
+		result = api.assign_work_packages(
+			"BOQ-1",
+			[{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1}],
+			test_run=0,
+		)
+
+		self.assertEqual(
+			result["lines"],
+			[
+				{
+					"boq_item": "I-2",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_SAVE_FAILED",
+					"message": "Could not save this BOQ line. Please try again or contact your administrator.",
+				}
+			],
+		)
+		self.assertNotIn(error_text, result["lines"][0]["message"])
+		self.assertEqual(
+			self.frappe.error_logs,
+			[{"title": "BOQ work package assignment", "message": "traceback"}],
+		)
+
+	def test_unique_and_multi_arg_validation_save_failures_hide_error_and_log_traceback(self):
+		class UniqueValidationError(frappe.ValidationError):
+			pass
+
+		class IntegrityError(Exception):
+			pass
+
+		for label, error in (
+			(
+				"unique_validation_error",
+				UniqueValidationError(
+					"BOQ Item",
+					"I-2",
+					IntegrityError(1062, "Duplicate entry 'I-2' for key 'PRIMARY'"),
+				),
+			),
+			("multi_arg_validation_error", frappe.ValidationError("Invalid docstatus", 1)),
+		):
+			with self.subTest(case=label):
+				self.frappe.error_logs.clear()
+				self.items[1].save_error = error
+				result = api.assign_work_packages(
+					"BOQ-1",
+					[{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1}],
+					test_run=0,
+				)
+
+				self.assertEqual(
+					result["lines"],
+					[
+						{
+							"boq_item": "I-2",
+							"status": "SKIPPED",
+							"reason": "WP_ASSIGN_SAVE_FAILED",
+							"message": "Could not save this BOQ line. Please try again or contact your administrator.",
+						}
+					],
+				)
+				self.assertEqual(
+					self.frappe.error_logs,
+					[{"title": "BOQ work package assignment", "message": "traceback"}],
+				)
 
 	def test_invalid_input_shape_raises_validation_error_before_any_work(self):
 		bad_payloads = [
