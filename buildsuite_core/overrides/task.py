@@ -23,8 +23,11 @@ class BuildSuiteTask(_ERPNextTask):
 	def reschedule_dependent_tasks(self):
 		if (
 			getattr(self.flags, "ignore_reschedule", False)
+			or getattr(self.flags, "in_schedule_cascade", False)
 			or frappe.flags.get("ignore_reschedule")
 			or frappe.flags.get("in_schedule_cascade")
+			or getattr(self, "is_template", 0)
+			or not getattr(self, "project", None)
 			or not (self.has_value_changed("exp_start_date") or self.has_value_changed("exp_end_date"))
 		):
 			return
