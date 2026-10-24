@@ -157,7 +157,6 @@ class AssignmentFrappe:
 		self.PermissionError = getattr(frappe, "PermissionError", PermissionError)
 		self.ValidationError = getattr(frappe, "ValidationError", ValueError)
 		self.throw = getattr(frappe, "throw", _throw)
-		self.utils = frappe.utils
 
 	def get_doc(self, doctype, name):
 		self.get_doc_calls.append((doctype, name))

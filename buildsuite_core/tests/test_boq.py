@@ -796,6 +796,49 @@ class TestAssignWorkPackages(unittest.TestCase):
 			[{"title": "BOQ work package assignment", "message": "traceback"}],
 		)
 
+	def test_unique_and_multi_arg_validation_save_failures_hide_error_and_log_traceback(self):
+		class UniqueValidationError(frappe.ValidationError):
+			pass
+
+		class IntegrityError(Exception):
+			pass
+
+		for label, error in (
+			(
+				"unique_validation_error",
+				UniqueValidationError(
+					"BOQ Item",
+					"I-2",
+					IntegrityError(1062, "Duplicate entry 'I-2' for key 'PRIMARY'"),
+				),
+			),
+			("multi_arg_validation_error", frappe.ValidationError("Invalid docstatus", 1)),
+		):
+			with self.subTest(case=label):
+				self.frappe.error_logs.clear()
+				self.items[1].save_error = error
+				result = api.assign_work_packages(
+					"BOQ-1",
+					[{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1}],
+					test_run=0,
+				)
+
+				self.assertEqual(
+					result["lines"],
+					[
+						{
+							"boq_item": "I-2",
+							"status": "SKIPPED",
+							"reason": "WP_ASSIGN_SAVE_FAILED",
+							"message": "Could not save this BOQ line. Please try again or contact your administrator.",
+						}
+					],
+				)
+				self.assertEqual(
+					self.frappe.error_logs,
+					[{"title": "BOQ work package assignment", "message": "traceback"}],
+				)
+
 	def test_invalid_input_shape_raises_validation_error_before_any_work(self):
 		bad_payloads = [
 			None,
