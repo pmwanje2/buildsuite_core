@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 import unittest
@@ -22,6 +23,10 @@ def _throw(msg, exc=ValueError):
 	if isinstance(exc, type) and issubclass(exc, BaseException):
 		raise exc(msg)
 	raise exc
+
+
+def _strip_html_tags(value):
+	return re.sub(r"<[^>]+>", "", str(value or ""))
 
 
 def ensure_frappe_stub():
@@ -44,13 +49,13 @@ def ensure_frappe_stub():
 			return _mark
 
 		frappe.whitelist = _whitelist
-		frappe.local = SimpleNamespace(message_log=[])
 		frappe.tests = types.ModuleType("frappe.tests")
 		frappe.tests.UnitTestCase = unittest.TestCase
 		frappe_utils = types.ModuleType("frappe.utils")
 		frappe_utils.cint = _cint
 		frappe_utils.flt = lambda value: float(value or 0)
 		frappe_utils.today = lambda: "2026-10-24"
+		frappe_utils.strip_html_tags = _strip_html_tags
 		sys.modules["frappe"] = frappe
 		sys.modules["frappe.tests"] = frappe.tests
 		sys.modules["frappe.utils"] = frappe_utils
@@ -62,14 +67,14 @@ def ensure_frappe_stub():
 		frappe.utils = frappe_utils
 		if not hasattr(frappe_utils, "cint"):
 			frappe_utils.cint = _cint
+		if not hasattr(frappe_utils, "strip_html_tags"):
+			frappe_utils.strip_html_tags = _strip_html_tags
 		if not hasattr(frappe, "PermissionError"):
 			frappe.PermissionError = PermissionError
 		if not hasattr(frappe, "ValidationError"):
 			frappe.ValidationError = ValueError
 		if not hasattr(frappe, "throw"):
 			frappe.throw = _throw
-		if not hasattr(frappe, "local"):
-			frappe.local = SimpleNamespace(message_log=[])
 	return frappe
 
 
@@ -95,9 +100,7 @@ class AssignmentDoc:
 		target.save_calls.append(kwargs)
 		target.work_package = getattr(self, "work_package", None)
 		if target.save_error is not None:
-			local = getattr(target._frappe, "local", None)
-			if isinstance(getattr(local, "message_log", None), list):
-				local.message_log.append(str(target.save_error))
+			target._frappe.local.message_log.append(str(target.save_error))
 			raise target.save_error
 
 	def add_comment(self, comment_type, content):
@@ -145,13 +148,16 @@ class AssignmentFrappe:
 		self.get_doc_calls = []
 		self.get_list_calls = []
 		self.get_all_calls = []
+		self.error_logs = []
 		self.flags = AssignmentFlags()
 		self.local = SimpleNamespace(message_log=[])
 		self.db = AssignmentDb(self.items)
+		self.utils = frappe.utils
 		self.DoesNotExistError = getattr(frappe, "DoesNotExistError", LookupError)
 		self.PermissionError = getattr(frappe, "PermissionError", PermissionError)
 		self.ValidationError = getattr(frappe, "ValidationError", ValueError)
 		self.throw = getattr(frappe, "throw", _throw)
+		self.utils = frappe.utils
 
 	def get_doc(self, doctype, name):
 		self.get_doc_calls.append((doctype, name))
@@ -202,3 +208,9 @@ class AssignmentFrappe:
 
 	def parse_json(self, value):
 		return json.loads(value)
+
+	def get_traceback(self):
+		return "traceback"
+
+	def log_error(self, message=None, title=None):
+		self.error_logs.append({"title": title, "message": message})

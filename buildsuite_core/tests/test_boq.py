@@ -730,7 +730,7 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.assertEqual(self.boq.comments, [])
 
 	def test_save_failure_rolls_back_line_savepoint_marks_skipped_and_saves_others(self):
-		self.items[1].save_error = RuntimeError("locked by freeze")
+		self.items[1].save_error = frappe.ValidationError("<b>locked by freeze</b>")
 		self.frappe.local.message_log = ["prior message"]
 
 		result = api.assign_work_packages(
@@ -752,7 +752,7 @@ class TestAssignWorkPackages(unittest.TestCase):
 				"boq_item": "I-2",
 				"status": "SKIPPED",
 				"reason": "WP_ASSIGN_SAVE_FAILED",
-				"message": "Could not save work package on this BOQ line: locked by freeze",
+				"message": "locked by freeze",
 			},
 		)
 		self.assertEqual(result["lines"][2], {"boq_item": "I-4", "status": "OK", "reason": None})
@@ -762,12 +762,39 @@ class TestAssignWorkPackages(unittest.TestCase):
 		self.assertEqual(len(self.frappe.db.savepoints), 3)
 		self.assertEqual(self.frappe.db.rollbacks, [self.frappe.db.savepoints[1]])
 		self.assertEqual(self.frappe.local.message_log, ["prior message"])
+		self.assertEqual(self.frappe.error_logs, [])
 		self.recompute.assert_called_once_with("BOQ-1")
 		self.assertEqual(len(self.boq.comments), 1)
 		self.assertIn("I-1: unassigned -> WP-B", self.boq.comments[0])
 		self.assertIn("I-4: unassigned -> WP-A", self.boq.comments[0])
 		self.assertNotIn("I-2", self.boq.comments[0])
 		self.assertNotIn("None", self.boq.comments[0])
+
+	def test_non_validation_save_failure_hides_error_and_logs_traceback(self):
+		error_text = "(1205, 'Lock wait timeout exceeded; try restarting transaction')"
+		self.items[1].save_error = RuntimeError(error_text)
+		result = api.assign_work_packages(
+			"BOQ-1",
+			[{"boq_item": "I-2", "work_package": "WP-B", "reassign": 1}],
+			test_run=0,
+		)
+
+		self.assertEqual(
+			result["lines"],
+			[
+				{
+					"boq_item": "I-2",
+					"status": "SKIPPED",
+					"reason": "WP_ASSIGN_SAVE_FAILED",
+					"message": "Could not save this BOQ line. Please try again or contact your administrator.",
+				}
+			],
+		)
+		self.assertNotIn(error_text, result["lines"][0]["message"])
+		self.assertEqual(
+			self.frappe.error_logs,
+			[{"title": "BOQ work package assignment", "message": "traceback"}],
+		)
 
 	def test_invalid_input_shape_raises_validation_error_before_any_work(self):
 		bad_payloads = [
