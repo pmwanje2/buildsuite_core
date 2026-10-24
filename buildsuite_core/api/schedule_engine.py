@@ -17,7 +17,7 @@ from datetime import timedelta
 
 import frappe
 from frappe import _
-from frappe.utils import getdate
+from frappe.utils import flt, getdate, today
 
 VALID_DEP_TYPES = ("FS", "SS", "FF")
 RESCHEDULABLE_STATUSES = ("Open", "Working", "Overdue")
@@ -288,7 +288,12 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None, asap=False)
 					}
 				)
 				working[tid] = {**cur, "start": binding, "end": new_end}
-		elif asap and delta < 0 and task.get("status") in ("Open", "Overdue") and not task.get("act_start_date"):
+		elif (
+			asap
+			and delta < 0
+			and task.get("status") in ("Open", "Overdue")
+			and not task.get("act_start_date")
+		):
 			if cur["is_ms"]:
 				moves.append(
 					{
@@ -319,11 +324,216 @@ def compute_cascade(root_id, tasks_by_id, edges, root_override=None, asap=False)
 	return moves
 
 
+def _throw_schedule_cycle():
+	msg = _("SCHEDULE_CYCLE: Circular dependency detected in schedule.")
+	exc_type = getattr(frappe, "ValidationError", ValueError)
+	if hasattr(frappe, "throw"):
+		frappe.throw(msg, exc_type)
+	raise exc_type(msg)
+
+
+def compute_cpm(tasks, edges, data_date, finish_constraint=None):
+	"""Pure Critical Path Method (forward + backward pass) from data_date."""
+	if isinstance(tasks, dict):
+		tasks_by_id = dict(tasks)
+	else:
+		tasks_by_id = {
+			(t.get("name") or t.get("task")): t for t in (tasks or []) if (t.get("name") or t.get("task"))
+		}
+	if not tasks_by_id:
+		return []
+
+	base_date = getdate(data_date) if data_date else getdate(today())
+	constraint_date = getdate(finish_constraint) if finish_constraint else None
+
+	valid_edges = [
+		{
+			"predecessor": e["predecessor"],
+			"successor": e["successor"],
+			"type": e.get("type") or "FS",
+			"lag": int(e.get("lag") or 0),
+		}
+		for e in (edges or [])
+		if e.get("predecessor") in tasks_by_id and e.get("successor") in tasks_by_id
+	]
+
+	indeg = {tid: 0 for tid in tasks_by_id}
+	preds_by_succ = {tid: [] for tid in tasks_by_id}
+	succs_by_pred = {tid: [] for tid in tasks_by_id}
+	for edge in valid_edges:
+		indeg[edge["successor"]] += 1
+		preds_by_succ[edge["successor"]].append(edge)
+		succs_by_pred[edge["predecessor"]].append(edge)
+
+	queue = [tid for tid, deg in indeg.items() if deg == 0]
+	order = []
+	while queue:
+		node = queue.pop(0)
+		order.append(node)
+		for edge in succs_by_pred[node]:
+			succ = edge["successor"]
+			indeg[succ] -= 1
+			if indeg[succ] == 0:
+				queue.append(succ)
+
+	if len(order) != len(tasks_by_id):
+		_throw_schedule_cycle()
+
+	early = {}
+	for tid in order:
+		t = tasks_by_id[tid]
+		is_ms = t.get("type") == "Milestone" or bool(t.get("is_milestone"))
+		raw_start = t.get("start") or t.get("exp_start_date")
+		raw_end = t.get("end") or t.get("exp_end_date")
+		start = getdate(raw_start) if raw_start else None
+		end = getdate(raw_end) if raw_end else None
+		act_start = getdate(t["act_start_date"]) if t.get("act_start_date") else None
+		raw_act_end = t.get("act_end_date") or t.get("completed_on")
+		act_end = getdate(raw_act_end) if raw_act_end else None
+		progress = min(max(flt(t.get("progress") or 0), 0.0), 100.0)
+		status = t.get("status") or t.get("task_status") or "Open"
+		is_completed = status == "Completed" or t.get("task_status") == "Completed" or progress >= 100.0
+		is_in_progress = not is_completed and (
+			status == "Working"
+			or t.get("task_status") == "In Progress"
+			or progress > 0.0
+			or act_start is not None
+		)
+		planned_dur = 0 if is_ms else (max(0, _diff_days(start, end)) if (start and end) else 0)
+		node_type = "Milestone" if is_ms else (t.get("type") or "Activity")
+
+		if is_completed:
+			if is_ms:
+				ms_date = act_end or act_start or end or start or base_date
+				es = ms_date
+				ef = ms_date
+				dur = 0
+			else:
+				es = act_start or start or end or base_date
+				ef = act_end or end or es
+				if _diff_days(es, ef) < 0:
+					ef = es
+				dur = _diff_days(es, ef)
+		else:
+			if is_ms:
+				dur = 0
+			elif is_in_progress:
+				dur = round(planned_dur * (100.0 - progress) / 100.0)
+			else:
+				dur = planned_dur
+
+			if preds_by_succ[tid] or is_in_progress:
+				es = base_date
+			elif is_ms:
+				es = max(base_date, end or start or base_date)
+			else:
+				es = max(base_date, start or base_date)
+
+			succ_proxy = {
+				"start": es,
+				"end": _add_days(es, dur),
+				"type": node_type,
+			}
+			for dep in preds_by_succ[tid]:
+				pred_node = early[dep["predecessor"]]
+				pred_proxy = {
+					"start": pred_node["es"],
+					"end": pred_node["ef"],
+					"type": pred_node["type"],
+				}
+				cand = _earliest_start_for_edge(pred_proxy, succ_proxy, dep, dur)
+				if cand and _diff_days(es, cand) > 0:
+					es = cand
+			ef = _add_days(es, dur)
+
+		early[tid] = {
+			"es": es,
+			"ef": ef,
+			"dur": dur,
+			"is_ms": is_ms,
+			"type": node_type,
+		}
+
+	project_lf = (
+		constraint_date
+		if constraint_date is not None
+		else max((node["ef"] for node in early.values()), default=base_date)
+	)
+	late = {}
+	for tid in reversed(order):
+		node = early[tid]
+		out_edges = succs_by_pred[tid]
+		if not out_edges:
+			lf = project_lf
+		else:
+			lf = None
+			for dep in out_edges:
+				succ_late = late[dep["successor"]]
+				dtype = dep["type"]
+				lag = dep["lag"]
+				if dtype == "FS":
+					cand_lf = _add_days(succ_late["ls"], -lag)
+				elif dtype == "SS":
+					cand_ls = _add_days(succ_late["ls"], -lag)
+					cand_lf = _add_days(cand_ls, node["dur"])
+				elif dtype == "FF":
+					cand_lf = _add_days(succ_late["lf"], -lag)
+				else:
+					continue
+				if lf is None or _diff_days(cand_lf, lf) > 0:
+					lf = cand_lf
+			if lf is None:
+				lf = project_lf
+		ls = _add_days(lf, -node["dur"])
+		late[tid] = {"ls": ls, "lf": lf}
+
+	results = []
+	for tid in tasks_by_id:
+		node = early[tid]
+		lnode = late[tid]
+		total_float = _diff_days(node["ef"], lnode["lf"])
+		out_edges = succs_by_pred[tid]
+		if not out_edges:
+			free_float = total_float
+		else:
+			ff_vals = []
+			pred_proxy = {
+				"start": node["es"],
+				"end": node["ef"],
+				"type": node["type"],
+			}
+			for dep in out_edges:
+				succ_node = early[dep["successor"]]
+				succ_proxy = {
+					"start": succ_node["es"],
+					"end": succ_node["ef"],
+					"type": succ_node["type"],
+				}
+				edge_es = _earliest_start_for_edge(pred_proxy, succ_proxy, dep, succ_node["dur"])
+				if edge_es is not None:
+					ff_vals.append(_diff_days(edge_es, succ_node["es"]))
+			free_float = min(ff_vals) if ff_vals else total_float
+
+		results.append(
+			{
+				"task": tid,
+				"early_start": _iso(node["es"]),
+				"early_finish": _iso(node["ef"]),
+				"late_start": _iso(lnode["ls"]),
+				"late_finish": _iso(lnode["lf"]),
+				"total_float": total_float,
+				"free_float": free_float,
+				"critical": total_float <= 0,
+			}
+		)
+	return results
+
+
 # --- frappe bindings: load graph, persist flags, recompute, reschedule --------
 
 
 def _load_graph(project):
-	tasks = frappe.get_all(
+	tasks = frappe.get_list(
 		"Task",
 		filters={"project": project},
 		fields=[
@@ -332,6 +542,8 @@ def _load_graph(project):
 			"exp_start_date",
 			"exp_end_date",
 			"act_start_date",
+			"act_end_date",
+			"progress",
 			"status",
 			"parent_task",
 		],
@@ -345,16 +557,19 @@ def _load_graph(project):
 			"start": getdate(t.exp_start_date) if t.exp_start_date else None,
 			"end": getdate(t.exp_end_date) if t.exp_end_date else None,
 			"status": t.status,
+			"progress": flt(getattr(t, "progress", 0)),
 			"parent_task": t.parent_task,
 			"act_start_date": getdate(t.act_start_date) if getattr(t, "act_start_date", None) else None,
+			"act_end_date": getdate(t.act_end_date) if getattr(t, "act_end_date", None) else None,
 		}
 	names = list(tasks_by_id.keys())
 	edges = []
 	if names:
-		rows = frappe.get_all(
+		rows = frappe.get_list(
 			"Task Depends On",
 			filters={"parent": ["in", names], "parenttype": "Task"},
 			fields=["parent", "task", "dependency_type", "lag_days"],
+			limit_page_length=0,
 		)
 		for r in rows:
 			# Only edges whose predecessor is also in this project's set. ERPNext
@@ -538,3 +753,12 @@ def reschedule_downstream(
 
 	recompute_schedule_conflicts(task)
 	return {"moves": moves}
+
+
+@frappe.whitelist()
+def get_critical_path(project: str, data_date: str | None = None):
+	"""Compute the project's CPM schedule and float on read without persisting."""
+	if not project:
+		frappe.throw(_("project is required"))
+	tasks_by_id, edges = _load_graph(project)
+	return compute_cpm(tasks_by_id, edges, data_date or today())
