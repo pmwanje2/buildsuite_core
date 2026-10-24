@@ -546,21 +546,28 @@ def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
 				item = entry["item"]
 				target_wp = entry["target_wp"]
 				savepoint = f"boq_assign_{index}"
-				local = getattr(frappe, "local", None)
-				message_log = getattr(local, "message_log", None)
-				prior_log_len = len(message_log) if isinstance(message_log, list) else None
+				prior_log_len = len(frappe.local.message_log)
 				frappe.db.savepoint(savepoint)
 				try:
 					item.work_package = target_wp
 					item.save(ignore_permissions=True)
 				except Exception as exc:
 					frappe.db.rollback(save_point=savepoint)
-					if prior_log_len is not None and isinstance(getattr(local, "message_log", None), list):
-						del local.message_log[prior_log_len:]
+					del frappe.local.message_log[prior_log_len:]
+					if isinstance(exc, frappe.ValidationError):
+						message = frappe.utils.strip_html_tags(str(exc))
+					else:
+						frappe.log_error(
+							title="BOQ work package assignment",
+							message=frappe.get_traceback(),
+						)
+						message = _(
+							"Could not save this BOQ line. Please try again or contact your administrator."
+						)
 					entry["line"].update(
 						status="SKIPPED",
 						reason="WP_ASSIGN_SAVE_FAILED",
-						message=_("Could not save work package on this BOQ line: {0}").format(exc),
+						message=message,
 					)
 					continue
 				saved.append(entry)
