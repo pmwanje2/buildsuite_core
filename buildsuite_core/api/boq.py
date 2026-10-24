@@ -399,3 +399,134 @@ def import_template(boq: str, estimate_template: str):
 		frappe.flags.boq_skip_rollup = False
 	recompute_boq(boq)
 	return {"boq": boq, "seeded": seeded}
+
+
+# --- work package mass assignment -----------------------------------------
+
+_CLOSED_WP_STATUSES = frozenset({"Completed", "Cancelled", "Closed"})
+
+
+def _is_test_run(value) -> bool:
+	if isinstance(value, str):
+		return value.strip().lower() not in ("0", "false", "no", "")
+	return bool(value)
+
+
+def _closed_wp_statuses() -> set[str]:
+	meta = frappe.get_meta("Work Package") if hasattr(frappe, "get_meta") else None
+	field = meta.get_field("status") if meta else None
+	options = {
+		opt.strip()
+		for opt in ((getattr(field, "options", "") or "").splitlines())
+		if opt.strip()
+	}
+	return (options & _CLOSED_WP_STATUSES) or set(_CLOSED_WP_STATUSES)
+
+
+def _get_doc_or_none(doctype: str, name: str | None):
+	if not name:
+		return None
+	missing = getattr(frappe, "DoesNotExistError", LookupError)
+	try:
+		return frappe.get_doc(doctype, name)
+	except missing:
+		return None
+
+
+@frappe.whitelist()
+def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
+	"""SAP PS mass change / Fiori mass edit for BOQ Item.work_package."""
+	boq_doc = frappe.get_doc("BOQ", boq)
+	if isinstance(assignments, str):
+		assignments = frappe.parse_json(assignments)
+	assignments = list(assignments or [])
+
+	closed_statuses = _closed_wp_statuses()
+	existing_rows = frappe.get_all(
+		"BOQ Item",
+		filters={"boq": boq_doc.name},
+		fields=["name", "work_package", "planned_amount"],
+	)
+	before_wp = {row.name: row.work_package for row in existing_rows}
+	amounts = {row.name: flt(row.planned_amount) for row in existing_rows}
+	after_wp = dict(before_wp)
+
+	lines = []
+	valid = []
+	touched_wps = []
+
+	def _touch_wp(wp_name):
+		if wp_name and wp_name not in touched_wps:
+			touched_wps.append(wp_name)
+
+	for row in assignments:
+		item_name = row.get("boq_item")
+		target_wp = row.get("work_package")
+		reassign = _is_test_run(row.get("reassign", 0))
+		item = _get_doc_or_none("BOQ Item", item_name)
+		wp = _get_doc_or_none("Work Package", target_wp)
+		current_wp = after_wp.get(item.name, item.work_package) if item else None
+
+		if not item:
+			reason = "WP_ASSIGN_LINE_NOT_IN_BOQ"
+		elif not frappe.has_permission("BOQ Item", "write", doc=item):
+			reason = "WP_ASSIGN_NOT_PERMITTED"
+		elif item.boq != boq_doc.name:
+			reason = "WP_ASSIGN_LINE_NOT_IN_BOQ"
+		elif not wp or wp.project != boq_doc.project:
+			reason = "WP_ASSIGN_WRONG_PROJECT"
+		elif wp.status in closed_statuses:
+			reason = "WP_ASSIGN_WP_CLOSED"
+		elif current_wp and current_wp != target_wp and not reassign:
+			reason = "WP_ASSIGN_REASSIGN_REQUIRED"
+		else:
+			reason = None
+
+		if reason:
+			lines.append({"boq_item": item_name, "status": "SKIPPED", "reason": reason})
+			continue
+
+		_touch_wp(before_wp.get(item.name) or current_wp)
+		_touch_wp(target_wp)
+		before_wp.setdefault(item.name, item.work_package)
+		amounts.setdefault(item.name, flt(item.planned_amount))
+		after_wp[item.name] = target_wp
+		valid.append((item, target_wp))
+		lines.append({"boq_item": item_name, "status": "OK", "reason": None})
+
+	if not _is_test_run(test_run) and valid:
+		prior_skip = frappe.flags.get("boq_skip_rollup")
+		frappe.flags.boq_skip_rollup = True
+		try:
+			counts = {}
+			for item, target_wp in valid:
+				item.work_package = target_wp
+				item.save(ignore_permissions=True)
+				counts[target_wp] = counts.get(target_wp, 0) + 1
+		finally:
+			frappe.flags.boq_skip_rollup = prior_skip
+		recompute_boq(boq_doc.name)
+		summary = ", ".join(f"{wp_name}: {count}" for wp_name, count in counts.items())
+		boq_doc.add_comment("Comment", f"Assigned work packages ({summary})")
+
+	packages = []
+	for wp_name in touched_wps:
+		before_items = [name for name, current in before_wp.items() if current == wp_name]
+		after_items = [name for name, current in after_wp.items() if current == wp_name]
+		packages.append(
+			{
+				"work_package": wp_name,
+				"before_count": len(before_items),
+				"after_count": len(after_items),
+				"before_amount": sum(amounts.get(name, 0.0) for name in before_items),
+				"after_amount": sum(amounts.get(name, 0.0) for name in after_items),
+			}
+		)
+
+	ok_count = len(valid)
+	return {
+		"lines": lines,
+		"packages": packages,
+		"ok": ok_count,
+		"skipped": len(lines) - ok_count,
+	}
