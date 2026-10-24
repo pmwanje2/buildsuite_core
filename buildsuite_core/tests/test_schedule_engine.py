@@ -7,11 +7,11 @@ produce identical results for the same inputs, so the client preview and the
 server's authoritative commit never disagree.
 """
 
-from datetime import date
 import inspect
 import sys
 import types
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 
@@ -59,8 +59,8 @@ def _ensure_frappe_stub():
 		frappe_utils.flt = lambda value: float(value or 0)
 		frappe_utils.cint = lambda value, default=0: int(float(value)) if value is not None else default
 		frappe_utils.today = lambda: "2026-01-01"
-		frappe_utils.getdate = (
-			lambda value=None: value
+		frappe_utils.getdate = lambda value=None: (
+			value
 			if isinstance(value, date)
 			else date.fromisoformat(str(value)[:10])
 			if value
@@ -72,8 +72,8 @@ def _ensure_frappe_stub():
 	else:
 		frappe_utils = sys.modules.get("frappe.utils")
 		if frappe_utils is not None and not hasattr(frappe_utils, "getdate"):
-			frappe_utils.getdate = (
-				lambda value=None: value
+			frappe_utils.getdate = lambda value=None: (
+				value
 				if isinstance(value, date)
 				else date.fromisoformat(str(value)[:10])
 				if value
@@ -199,9 +199,7 @@ class TestCriticalPath(unittest.TestCase):
 	def test_milestone_has_zero_duration_and_single_date(self):
 		tasks = {
 			"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 5)),
-			"M": _cpm_t(
-				"M", None, date(2026, 1, 5), type="Milestone"
-			),
+			"M": _cpm_t("M", None, date(2026, 1, 5), type="Milestone"),
 		}
 		result = eng.compute_cpm(tasks, [_e("A", "M")], date(2026, 1, 1))
 		milestone = next(row for row in result if row["task"] == "M")
@@ -278,16 +276,19 @@ class TestCriticalPath(unittest.TestCase):
 
 		load_graph.assert_called_once_with("PROJ-1")
 		self.assertEqual(result[0]["task"], "A")
-		self.assertEqual(set(result[0]), {
-			"task",
-			"early_start",
-			"early_finish",
-			"late_start",
-			"late_finish",
-			"total_float",
-			"free_float",
-			"critical",
-		})
+		self.assertEqual(
+			set(result[0]),
+			{
+				"task",
+				"early_start",
+				"early_finish",
+				"late_start",
+				"late_finish",
+				"total_float",
+				"free_float",
+				"critical",
+			},
+		)
 
 	def test_schedule_loader_uses_permission_respecting_lists(self):
 		class Row:
@@ -308,6 +309,7 @@ class TestCriticalPath(unittest.TestCase):
 			)
 		]
 		edge_rows = []
+
 		def get_list(doctype, **kwargs):
 			return task_rows if doctype == "Task" else edge_rows
 
@@ -378,7 +380,9 @@ class TestScheduleEngine(UnitTestCase):
 			"B": _t("B", start=date(2026, 1, 2), end=date(2026, 1, 6)),
 		}
 		moves = eng.compute_cascade(
-			"A", tasks, [_e("A", "B", type="SS", lag=5)],
+			"A",
+			tasks,
+			[_e("A", "B", type="SS", lag=5)],
 			{"start": date(2026, 1, 10), "end": None},
 		)
 		self.assertEqual(len(moves), 1)
@@ -401,9 +405,7 @@ class TestScheduleEngine(UnitTestCase):
 		edges = [_e("A", "B", type="SS", lag=5)]
 		self.assertEqual(eng._compute_earliest_start("B", tasks, edges)[0], date(2026, 1, 6))
 		self.assertEqual(
-			eng.compute_cascade(
-				"A", tasks, edges, {"start": date(2026, 1, 1), "end": date(2026, 1, 20)}
-			),
+			eng.compute_cascade("A", tasks, edges, {"start": date(2026, 1, 1), "end": date(2026, 1, 20)}),
 			[],
 		)
 
@@ -413,7 +415,9 @@ class TestScheduleEngine(UnitTestCase):
 			"B": _t("B", start=date(2026, 1, 3), end=date(2026, 1, 8)),
 		}
 		moves = eng.compute_cascade(
-			"A", tasks, [_e("A", "B", type="FF", lag=2)],
+			"A",
+			tasks,
+			[_e("A", "B", type="FF", lag=2)],
 			{"start": date(2026, 1, 1), "end": date(2026, 1, 25)},
 		)
 		self.assertEqual(len(moves), 1)
@@ -447,10 +451,38 @@ class TestScheduleEngine(UnitTestCase):
 		def get_list(doctype, **kwargs):
 			if doctype == "Task":
 				return [
-					Row(name="1.0", type="Activity", exp_start_date="2026-01-01", exp_end_date="2026-01-10", status="Open", parent_task=None),
-					Row(name="1.3", type="Activity", exp_start_date="2026-01-02", exp_end_date="2026-01-09", status="Open", parent_task="1.0"),
-					Row(name="2.1", type="Activity", exp_start_date="2026-01-01", exp_end_date="2026-01-10", status="Open", parent_task=None),
-					Row(name="2.2", type="Activity", exp_start_date="2026-01-10", exp_end_date="2026-01-12", status="Open", parent_task=None),
+					Row(
+						name="1.0",
+						type="Activity",
+						exp_start_date="2026-01-01",
+						exp_end_date="2026-01-10",
+						status="Open",
+						parent_task=None,
+					),
+					Row(
+						name="1.3",
+						type="Activity",
+						exp_start_date="2026-01-02",
+						exp_end_date="2026-01-09",
+						status="Open",
+						parent_task="1.0",
+					),
+					Row(
+						name="2.1",
+						type="Activity",
+						exp_start_date="2026-01-01",
+						exp_end_date="2026-01-10",
+						status="Open",
+						parent_task=None,
+					),
+					Row(
+						name="2.2",
+						type="Activity",
+						exp_start_date="2026-01-10",
+						exp_end_date="2026-01-12",
+						status="Open",
+						parent_task=None,
+					),
 				]
 			return [
 				Row(parent="1.0", task="1.3", dependency_type="FS", lag_days=0),
@@ -774,7 +806,9 @@ class TestScheduleEngine(UnitTestCase):
 			patch.object(eng.frappe, "throw", side_effect=throw),
 			patch.object(eng, "_apply_moves") as apply_moves,
 			patch.object(eng, "recompute_schedule_conflicts"),
-			self.assertRaisesRegex(ValueError, "slip_days requires the root task to have at least one expected date"),
+			self.assertRaisesRegex(
+				ValueError, "slip_days requires the root task to have at least one expected date"
+			),
 		):
 			eng.reschedule_downstream("root", dry_run=0, slip_days=5)
 
@@ -891,9 +925,7 @@ class TestScheduleEngine(UnitTestCase):
 			patch.object(eng.frappe, "throw", side_effect=ValueError),
 			self.assertRaises(ValueError),
 		):
-			eng.reschedule_downstream(
-				"root", new_start="2026-03-02", dry_run=1, slip_days=5
-			)
+			eng.reschedule_downstream("root", new_start="2026-03-02", dry_run=1, slip_days=5)
 
 	def test_inspection_gate_blocks_successor(self):
 		tasks = {
