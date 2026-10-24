@@ -392,6 +392,18 @@ class TestCriticalPath(unittest.TestCase):
 		self.assertEqual(row["early_start"], "2026-01-10")
 		self.assertEqual(row["early_finish"], "2026-01-13")
 
+	def test_existing_frappe_get_list_is_preserved_and_patch_is_restored(self):
+		existing_get_list = object()
+		fake_frappe = types.ModuleType("frappe")
+		fake_frappe.get_list = existing_get_list
+
+		with patch.dict(sys.modules, {"frappe": fake_frappe}):
+			_ensure_frappe_stub()
+			self.assertIs(fake_frappe.get_list, existing_get_list)
+			with patch.object(fake_frappe, "get_list", _stub_get_list):
+				self.assertIs(fake_frappe.get_list, _stub_get_list)
+			self.assertIs(fake_frappe.get_list, existing_get_list)
+
 	def test_stub_get_list_rejects_child_table_without_parent_doctype(self):
 		with self.assertRaises(eng.frappe.PermissionError):
 			eng.frappe.get_list("Task Depends On", filters={"parent": ["in", ["A"]]})
