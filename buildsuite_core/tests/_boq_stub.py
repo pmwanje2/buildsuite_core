@@ -44,6 +44,7 @@ def ensure_frappe_stub():
 			return _mark
 
 		frappe.whitelist = _whitelist
+		frappe.local = SimpleNamespace(message_log=[])
 		frappe.tests = types.ModuleType("frappe.tests")
 		frappe.tests.UnitTestCase = unittest.TestCase
 		frappe_utils = types.ModuleType("frappe.utils")
@@ -67,21 +68,24 @@ def ensure_frappe_stub():
 			frappe.ValidationError = ValueError
 		if not hasattr(frappe, "throw"):
 			frappe.throw = _throw
+		if not hasattr(frappe, "local"):
+			frappe.local = SimpleNamespace(message_log=[])
 	return frappe
 
 
 class AssignmentDoc:
-	def __init__(self, _origin=None, save_error=None, **values):
+	def __init__(self, _origin=None, _frappe=None, save_error=None, **values):
 		self._field_names = tuple(values.keys())
 		self.__dict__.update(values)
 		self._origin = _origin
+		self._frappe = _frappe
 		self.save_error = save_error
 		self.save_calls = []
 		self.comments = []
 
 	def clone(self) -> AssignmentDoc:
 		values = {name: getattr(self, name) for name in self._field_names}
-		return AssignmentDoc(_origin=self, save_error=self.save_error, **values)
+		return AssignmentDoc(_origin=self, _frappe=self._frappe, save_error=self.save_error, **values)
 
 	def get(self, key, default=None):
 		return getattr(self, key, default)
@@ -91,6 +95,9 @@ class AssignmentDoc:
 		target.save_calls.append(kwargs)
 		target.work_package = getattr(self, "work_package", None)
 		if target.save_error is not None:
+			local = getattr(target._frappe, "local", None)
+			if isinstance(getattr(local, "message_log", None), list):
+				local.message_log.append(str(target.save_error))
 			raise target.save_error
 
 	def add_comment(self, comment_type, content):
@@ -129,6 +136,8 @@ class AssignmentFrappe:
 		frappe = ensure_frappe_stub()
 		self.boq = boq
 		self.items = {item.name: item for item in items}
+		for item in self.items.values():
+			item._frappe = self
 		self.work_packages = {work_package.name: work_package for work_package in work_packages}
 		self.denied = set(denied)
 		self.unreadable = set(unreadable)
@@ -137,6 +146,7 @@ class AssignmentFrappe:
 		self.get_list_calls = []
 		self.get_all_calls = []
 		self.flags = AssignmentFlags()
+		self.local = SimpleNamespace(message_log=[])
 		self.db = AssignmentDb(self.items)
 		self.DoesNotExistError = getattr(frappe, "DoesNotExistError", LookupError)
 		self.PermissionError = getattr(frappe, "PermissionError", PermissionError)
