@@ -241,7 +241,7 @@ class TestCriticalPath(unittest.TestCase):
 			"A": _cpm_t("A", date(2026, 1, 1), date(2026, 1, 3)),
 			"B": _cpm_t("B", date(2026, 1, 3), date(2026, 1, 5)),
 		}
-		with self.assertRaisesRegex(ValueError, "SCHEDULE_CYCLE"):
+		with self.assertRaisesRegex(frappe.ValidationError, "SCHEDULE_CYCLE"):
 			eng.compute_cpm(tasks, [_e("A", "B"), _e("B", "A")], date(2026, 1, 1))
 
 	def test_completed_task_is_fixed_to_actuals_before_data_date(self):
@@ -880,9 +880,9 @@ class TestScheduleEngine(UnitTestCase):
 
 		root = Root()
 		tasks = {"root": _t("root", start=root.exp_start_date, end=root.exp_end_date)}
-		eng.frappe.flags = type("Flags", (), {})()
 
 		with (
+			patch.object(eng.frappe, "flags", type("Flags", (), {})()),
 			patch.object(eng.frappe, "get_doc", return_value=root),
 			patch.object(eng, "_load_graph", return_value=(tasks, [])),
 			patch.object(eng, "recompute_schedule_conflicts"),
@@ -929,9 +929,11 @@ class TestScheduleEngine(UnitTestCase):
 
 		root = StubDoc("root", "Activity", date(2026, 3, 1), date(2026, 3, 10))
 		milestone = StubDoc("milestone", "Milestone", date(2026, 3, 12), date(2026, 3, 12))
-		eng.frappe.flags = type("Flags", (), {})()
 
-		with patch.object(eng.frappe, "get_doc", return_value=milestone):
+		with (
+			patch.object(eng.frappe, "flags", type("Flags", (), {})()),
+			patch.object(eng.frappe, "get_doc", return_value=milestone),
+		):
 			eng._apply_moves(
 				root,
 				[
@@ -985,9 +987,9 @@ class TestScheduleEngine(UnitTestCase):
 				"exp_end_date": date(2026, 3, 10),
 			},
 		)()
-		eng.frappe.flags = type("Flags", (), {})()
 
 		with (
+			patch.object(eng.frappe, "flags", type("Flags", (), {})()),
 			patch.object(eng.frappe, "get_doc", return_value=root),
 			patch.object(
 				eng,
@@ -1016,9 +1018,9 @@ class TestScheduleEngine(UnitTestCase):
 				"exp_end_date": date(2026, 1, 10),
 			},
 		)()
-		eng.frappe.flags = type("Flags", (), {})()
 
 		with (
+			patch.object(eng.frappe, "flags", type("Flags", (), {})()),
 			patch.object(eng.frappe, "get_doc", return_value=root),
 			patch.object(
 				eng,
