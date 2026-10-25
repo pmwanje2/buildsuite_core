@@ -35,13 +35,13 @@ def _ensure_frappe_stub():
 		frappe.__path__ = []
 		frappe._ = lambda value, *args: value
 		frappe.PermissionError = PermissionError
-		frappe.ValidationError = ValueError
+		frappe.ValidationError = type("ValidationError", (Exception,), {})
 		frappe.DoesNotExistError = LookupError
 
-		def _throw(msg, exc=ValueError):
+		def _throw(msg, exc=frappe.ValidationError):
 			if isinstance(exc, type) and issubclass(exc, BaseException):
 				raise exc(msg)
-			raise ValueError(msg)
+			raise frappe.ValidationError(msg)
 
 		def _whitelist(*args, **kwargs):
 			def _mark(fn):
@@ -1042,6 +1042,22 @@ class TestScheduleEngine(UnitTestCase):
 
 		self.assertEqual(result, {"moves": []})
 		capture_snapshot.assert_not_called()
+
+	def test_frappe_flags_is_restored_after_flag_patching_tests(self):
+		original_flags = eng.frappe.flags
+		try:
+			for method in (
+				self.test_root_only_slip_returns_root_move_snapshots_and_saves_root_once,
+				self.test_apply_moves_writes_milestone_start_before_normalization_hook,
+				self.test_zero_day_slip_is_a_no_op,
+				self.test_explicit_single_task_move_has_no_root_move_or_snapshot,
+			):
+				with self.subTest(method=method.__name__):
+					eng.frappe.flags = original_flags
+					method()
+					self.assertIs(eng.frappe.flags, original_flags)
+		finally:
+			eng.frappe.flags = original_flags
 
 	def test_load_graph_includes_actual_start_date(self):
 		class Row:
