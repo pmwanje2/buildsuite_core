@@ -713,11 +713,11 @@ def import_project_template(
 		created = _apply_template_import(
 			doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks), plan=plan
 		)
-	except frappe.ValidationError:
+	except frappe.ValidationError as exc:
 		frappe.db.rollback(save_point="template_import")
 		if prior_log_len is not None:
 			del message_log[prior_log_len:]
-		raise
+		frappe.throw(frappe.utils.strip_html_tags(str(exc)).strip(), frappe.ValidationError)
 	except Exception as exc:
 		frappe.db.rollback(save_point="template_import")
 		if prior_log_len is not None:
