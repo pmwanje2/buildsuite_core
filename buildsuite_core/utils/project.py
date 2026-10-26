@@ -684,6 +684,14 @@ def import_project_template(
 	if not (seed_wps or seed_stages or seed_tasks):
 		frappe.throw(_("Choose at least one of Work Packages, Stages or Tasks to import."))
 
+	for selected, doctype in (
+		(seed_wps, "Work Package"),
+		(seed_stages, "Stage Planning"),
+		(seed_tasks, "Task"),
+	):
+		if selected:
+			frappe.has_permission(doctype, ptype="create", throw=True)
+
 	template = frappe.get_doc("Project Template", template_name)
 	message_log = getattr(frappe.local, "message_log", None)
 	prior_log_len = len(message_log) if isinstance(message_log, list) else None
