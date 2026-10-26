@@ -529,6 +529,27 @@ def _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tas
 					exc,
 				)
 
+	date_ranges = [(row["exp_start_date"], row["exp_end_date"]) for row in task_rows]
+	if seed_stages:
+		date_ranges.extend(
+			(
+				frappe.utils.add_days(base, row.offset_start_days or 0),
+				frappe.utils.add_days(base, row.offset_end_days or 0),
+			)
+			for row in template.custom_stages or []
+		)
+	getdate = frappe.utils.getdate
+	for start, end in date_ranges:
+		if (
+			(start and end and getdate(start) > getdate(end))
+			or (start and getdate(start) < getdate(base))
+			or (end and project_doc.expected_end_date and getdate(end) > getdate(project_doc.expected_end_date))
+		):
+			_template_error(
+				"TEMPLATE_DATES_OUT_OF_RANGE",
+				_("Template dates must be ordered and fit within the project's date window."),
+			)
+
 	for dependency in dependencies:
 		if dependency["depends_on"] not in template_task_names:
 			_template_error(
