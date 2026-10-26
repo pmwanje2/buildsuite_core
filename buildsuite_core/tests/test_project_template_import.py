@@ -176,8 +176,8 @@ class FakeState:
 			subject="Succ",
 			priority="Medium",
 			expected_time=16,
-			start=None,
-			duration=None,
+			start=0,
+			duration=0,
 			depends_on=[Row(task="TPL-PRED", dependency_type="SS", lag_days=2)],
 		)
 		self.template_tasks = {
