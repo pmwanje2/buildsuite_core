@@ -145,8 +145,9 @@ def explode_item(boq_item: str):
 					"source_assembly": assembly.name,
 				}
 			).insert(ignore_permissions=True)
-			# Sub-item amounts are per BOQ unit, using the inserted rate snapshot.
-			rate += flt(sub.amount)
+			# Document.insert() leaves the object unrounded; Currency storage is
+			# decimal(21,9). Sum the per-unit snapshots at their persisted scale.
+			rate += flt(sub.amount, 9)
 		item.quantity_source = "Assembly"
 		item.rate = rate
 		item.planned_qty = driving
@@ -236,7 +237,7 @@ def _clone_tree(src_boq, dst_boq, reset_actuals=True, src_wp=None, wp_override=N
 		item_map[it.name] = ni.name
 		count += 1
 		for si in frappe.get_all("BOQ Sub Item", filters={"boq_item": it.name}, fields=["*"]):
-			frappe.get_doc(
+			sub = frappe.get_doc(
 				{
 					"doctype": "BOQ Sub Item",
 					"boq": dst_boq,
@@ -245,12 +246,16 @@ def _clone_tree(src_boq, dst_boq, reset_actuals=True, src_wp=None, wp_override=N
 					"description": si.description,
 					"qty_per_unit": si.qty_per_unit,
 					"rate": si.rate,
+					"amount": si.amount,
+					"uom": si.uom,
 					"qty": si.qty,
 					"work_package": wp_override or (None if drop_wp else si.work_package),
 					"cost_head": si.cost_head,
 					"source_assembly": si.source_assembly,
 				}
-			).insert(ignore_permissions=True)
+			)
+			sub.flags.keep_snapshot = True
+			sub.insert(ignore_permissions=True)
 	# Drop groups that ended up empty (when filtering by a source WP).
 	if src_wp:
 		for gname in group_map.values():

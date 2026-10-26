@@ -64,7 +64,7 @@ def get_rate_update_threshold():
 
 
 @frappe.whitelist()
-def update_rates_from_po(purchase_order: str, updates: str, supplier: str | None = None):
+def update_rates_from_po(purchase_order=None, updates=None, supplier=None, **kwargs):
 	"""Retained only to give stale clients a safe, actionable refusal."""
 	frappe.throw(
 		_("Purchase orders no longer change estimating rates. Use Price changes to review."),
