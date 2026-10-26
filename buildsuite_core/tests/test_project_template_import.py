@@ -154,6 +154,7 @@ class FakeState:
 		self.cascade_flags_seen = []
 		self.conflict_snapshots = []
 		self.fail_conflicts = False
+		self.conflict_error = RuntimeError("private conflict SQL")
 		self.denied_creates = set()
 		self.frappe_ref = None
 
@@ -365,7 +366,7 @@ class TestProjectTemplateImport(unittest.TestCase):
 				)
 			)
 			if self.state.fail_conflicts:
-				raise RuntimeError("private conflict SQL")
+				raise self.state.conflict_error
 
 		schedule.recompute_schedule_conflicts = recompute
 		with patch.dict(sys.modules, {"buildsuite_core.api.schedule_engine": schedule}):
@@ -605,6 +606,24 @@ class TestProjectTemplateImport(unittest.TestCase):
 		self.assertEqual(self.state.saved, [])
 		self.assertEqual(len(self.state.error_logs), 1)
 		self.assertFalse(self.module.frappe.flags.in_schedule_cascade)
+
+	def test_conflict_validation_errors_use_the_same_safe_import_boundary(self):
+		for error, logs in (
+			(FakeValidationError("<b>Schedule is locked</b>"), 0),
+			(FakeValidationError("private conflict SQL", 1062), 1),
+		):
+			with self.subTest(error=error.args):
+				self.setUp()
+				self.state.fail_conflicts = True
+				self.state.conflict_error = error
+				with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_IMPORT_FAILED:") as caught:
+					self._import(test_run=0)
+				self.assertNotIn("<b>", str(caught.exception))
+				self.assertNotIn("private conflict SQL", str(caught.exception))
+				self.assertNotIn("1062", str(caught.exception))
+				self.assertEqual(self.state.inserted, [])
+				self.assertEqual(self.state.saved, [])
+				self.assertEqual(len(self.state.error_logs), logs)
 
 	def test_unexpected_error_log_survives_template_savepoint_rollback(self):
 		self.state.fail_subject = "Succ"
