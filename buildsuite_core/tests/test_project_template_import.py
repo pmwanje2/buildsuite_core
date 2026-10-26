@@ -116,14 +116,16 @@ class FakeDb:
 		self._snapshots[name] = (
 			list(self._state.inserted),
 			self._state.sequence,
+			list(self._state.error_logs),
 		)
 
 	def rollback(self, *, save_point=None):
 		self.rollback_calls.append(save_point)
 		if save_point in self._snapshots:
-			inserted, sequence = self._snapshots[save_point]
+			inserted, sequence, error_logs = self._snapshots[save_point]
 			self._state.inserted = inserted
 			self._state.sequence = sequence
+			self._state.error_logs = error_logs
 
 
 class FakeState:
@@ -436,6 +438,22 @@ class TestProjectTemplateImport(unittest.TestCase):
 			self._import(test_run=0)
 		self.assertNotIn("1062", str(multi_val.exception))
 		self.assertEqual(len(self.state.error_logs), 1)
+
+	def test_unexpected_error_log_survives_template_savepoint_rollback(self):
+		self.state.fail_subject = "Succ"
+		with self.assertRaisesRegex(FakeValidationError, "TEMPLATE_TASK_CREATE_FAILED"):
+			self._import(test_run=0)
+		self.assertEqual(self.state.inserted, [])
+		self.assertEqual(len(self.state.error_logs), 1)
+		self.assertEqual(self.module.frappe.db.rollback_calls, ["template_import"])
+
+	def test_unexpected_preview_error_is_logged_without_writes(self):
+		del self.state.template_tasks["TPL-PRED"]
+		with self.assertRaisesRegex(FakeValidationError, "TEMPLATE_TASK_PLAN_FAILED"):
+			self._import(test_run=1)
+		self.assertEqual(len(self.state.error_logs), 1)
+		self.assertEqual(self.state.inserted, [])
+		self.assertEqual(self.module.frappe.db.rollback_calls, [])
 
 	def test_work_package_validation_errors_have_safe_stable_reason(self):
 		self.state.fail_wp_code = "WP-NEW"
