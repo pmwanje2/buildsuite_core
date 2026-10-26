@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -416,13 +419,292 @@ def _apply_template(project_doc, template, seed_wps, seed_stages, seed_tasks):
 	return created
 
 
+def _template_value(row, field, default=None):
+	if hasattr(row, "get"):
+		return row.get(field, default)
+	return getattr(row, field, default)
+
+
+def _template_error(reason, message, exc=None):
+	"""Refuse an import with a stable reason and a user-safe message."""
+	if exc is not None:
+		if isinstance(exc, frappe.ValidationError) and len(exc.args) == 1 and isinstance(exc.args[0], str):
+			detail = frappe.utils.strip_html_tags(str(exc)).strip()
+			if detail:
+				message = f"{message} {detail}"
+	try:
+		frappe.throw(f"{reason}: {message}", frappe.ValidationError)
+	except frappe.ValidationError as cleaned:
+		raise cleaned from exc
+
+
+def _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tasks):
+	"""Build the read-only preview used by both preview and productive imports."""
+	existing_wps = {
+		wp.code: wp.name
+		for wp in frappe.get_all(
+			"Work Package", filters={"project": project_doc.name}, fields=["name", "code"]
+		)
+		if wp.code
+	}
+	work_packages_created = []
+	work_packages_reused = []
+	skipped = []
+	if seed_wps:
+		for row in sorted(template.custom_work_packages or [], key=lambda r: r.sort_order or 0):
+			if row.code in existing_wps:
+				work_packages_reused.append(row.code)
+				skipped.append(
+					{
+						"kind": "work_package",
+						"code": row.code,
+						"reason": "TEMPLATE_WP_REUSED",
+						"message": _("Work package {0} already exists and will be reused.").format(row.code),
+					}
+				)
+			else:
+				work_packages_created.append(row.code)
+
+	stage_by_name = {stage.stage_name: stage for stage in (template.custom_stages or [])}
+	base = project_doc.expected_start_date or frappe.utils.today()
+
+	task_rows = []
+	dependencies = []
+	template_task_names = {row.task for row in (template.tasks or [])}
+	if seed_tasks:
+		add_days = frappe.utils.add_days
+		cint = frappe.utils.cint
+
+		for row in template.tasks or []:
+			try:
+				template_task = frappe.get_doc("Task", row.task)
+				task_start = _template_value(template_task, "start")
+				task_duration = _template_value(template_task, "duration")
+				stage_name = _template_value(row, "custom_stage")
+				stage = stage_by_name.get(stage_name)
+				if (
+					task_start is None
+					or task_duration is None
+					or (cint(task_start) == 0 and cint(task_duration) == 0)
+				):
+					if stage is not None:
+						start_offset = cint(_template_value(stage, "offset_start_days"))
+						end_offset = cint(_template_value(stage, "offset_end_days"))
+						exp_start_date = add_days(base, start_offset)
+						exp_end_date = add_days(base, end_offset)
+					else:
+						exp_start_date = None
+						exp_end_date = None
+				else:
+					start_offset = cint(task_start)
+					duration = cint(task_duration)
+					exp_start_date = add_days(base, start_offset)
+					exp_end_date = add_days(exp_start_date, duration)
+
+				task_rows.append(
+					{
+						"template_task": row.task,
+						"subject": template_task.subject,
+						"priority": template_task.priority or "Medium",
+						"expected_time": template_task.expected_time or 0,
+						"work_package_code": _template_value(row, "custom_work_package_code"),
+						"stage": stage_name,
+						"exp_start_date": exp_start_date,
+						"exp_end_date": exp_end_date,
+					}
+				)
+				for dependency in template_task.get("depends_on") or []:
+					dependencies.append(
+						{
+							"task": row.task,
+							"depends_on": dependency.task,
+							"dependency_type": dependency.get("dependency_type") or "FS",
+							"lag_days": cint(dependency.get("lag_days")),
+						}
+					)
+			except Exception as exc:
+				_template_error(
+					"TEMPLATE_TASK_PLAN_FAILED",
+					_("Could not plan task {0}.").format(row.task),
+					exc,
+				)
+
+	date_ranges = [(row["exp_start_date"], row["exp_end_date"]) for row in task_rows]
+	if seed_stages:
+		date_ranges.extend(
+			(
+				frappe.utils.add_days(base, row.offset_start_days or 0),
+				frappe.utils.add_days(base, row.offset_end_days or 0),
+			)
+			for row in template.custom_stages or []
+		)
+	getdate = frappe.utils.getdate
+	for start, end in date_ranges:
+		if (
+			(start and end and getdate(start) > getdate(end))
+			or (start and getdate(start) < getdate(base))
+			or (
+				end
+				and project_doc.expected_end_date
+				and getdate(end) > getdate(project_doc.expected_end_date)
+			)
+		):
+			_template_error(
+				"TEMPLATE_DATES_OUT_OF_RANGE",
+				_("Template dates must be ordered and fit within the project's date window."),
+			)
+
+	for dependency in dependencies:
+		if dependency["depends_on"] not in template_task_names:
+			_template_error(
+				"TEMPLATE_DEPENDENCY_NOT_IN_TEMPLATE",
+				_("Task {0} depends on a task that is not in this template.").format(dependency["task"]),
+			)
+
+	end_dates = [task_row["exp_end_date"] for task_row in task_rows if task_row["exp_end_date"]]
+	computed_finish = max(end_dates) if end_dates else None
+	return {
+		"existing_wps": existing_wps,
+		"work_packages_created": work_packages_created,
+		"work_packages_reused": work_packages_reused,
+		"task_rows": task_rows,
+		"dependencies": dependencies,
+		"computed_finish": computed_finish,
+		"skipped": skipped,
+		"stage_count": len(template.custom_stages or []) if seed_stages else 0,
+	}
+
+
+def _apply_template_import(project_doc, template, seed_wps, seed_stages, seed_tasks, plan=None):
+	"""Append a Project Template's Work Packages, dated Tasks and Stages.
+
+	Only the explicit import is strict; create-time seeding stays lenient.
+	"""
+	plan = plan or _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tasks)
+	created = {
+		"work_packages": 0,
+		"tasks": 0,
+		"stages": 0,
+		"work_packages_created": list(plan["work_packages_created"]),
+		"work_packages_reused": list(plan["work_packages_reused"]),
+		"task_rows": list(plan["task_rows"]),
+		"dependencies": list(plan["dependencies"]),
+		"computed_finish": plan["computed_finish"],
+		"skipped": list(plan["skipped"]),
+	}
+
+	wp_by_code = dict(plan["existing_wps"])
+	wp_rows = {row.code: row for row in (template.custom_work_packages or [])}
+	for code in plan["work_packages_created"]:
+		row = wp_rows[code]
+		try:
+			wp = frappe.get_doc(
+				{
+					"doctype": "Work Package",
+					"project": project_doc.name,
+					"code": row.code,
+					"work_package_name": row.work_package_name,
+					"budget": row.budget or 0,
+					"description": row.description,
+					"status": "Planned",
+				}
+			).insert(ignore_permissions=True)
+		except Exception as exc:
+			_template_error(
+				"TEMPLATE_WORK_PACKAGE_CREATE_FAILED",
+				_("Could not import work package {0}.").format(code),
+				exc,
+			)
+		wp_by_code[code] = wp.name
+		created["work_packages"] += 1
+
+	tasks_by_stage = {}
+	task_by_template = {}
+	if seed_tasks:
+		for task_row in plan["task_rows"]:
+			try:
+				task = frappe.get_doc(
+					{
+						"doctype": "Task",
+						"project": project_doc.name,
+						"subject": task_row["subject"],
+						"priority": task_row["priority"],
+						"expected_time": task_row["expected_time"],
+						"work_package": wp_by_code.get(task_row["work_package_code"]),
+						"task_status": "Yet To Start",
+						"exp_start_date": task_row["exp_start_date"],
+						"exp_end_date": task_row["exp_end_date"],
+						"template_task": task_row["template_task"],
+					}
+				).insert(ignore_permissions=True)
+			except Exception as exc:
+				_template_error(
+					"TEMPLATE_TASK_CREATE_FAILED",
+					_("Could not import task '{0}'.").format(task_row["subject"]),
+					exc,
+				)
+			task_by_template[task_row["template_task"]] = task
+			created["tasks"] += 1
+			if task_row["stage"]:
+				tasks_by_stage.setdefault(task_row["stage"], []).append(task.name)
+
+		for dependency in plan["dependencies"]:
+			try:
+				task = task_by_template[dependency["task"]]
+				task.append(
+					"depends_on",
+					{
+						"task": task_by_template[dependency["depends_on"]].name,
+						"dependency_type": dependency["dependency_type"],
+						"lag_days": dependency["lag_days"],
+					},
+				)
+				task.save(ignore_permissions=True)
+			except Exception as exc:
+				_template_error(
+					"TEMPLATE_DEPENDENCY_CREATE_FAILED",
+					_("Could not copy dependencies for task '{0}'.").format(dependency["task"]),
+					exc,
+				)
+
+	if seed_stages:
+		try:
+			created["stages"] = _seed_stages_from_template(project_doc, template, tasks_by_stage)
+		except Exception as exc:
+			_template_error(
+				"TEMPLATE_STAGE_CREATE_FAILED",
+				_("Could not import the project stages."),
+				exc,
+			)
+
+	if task_by_template:
+		from buildsuite_core.api.schedule_engine import recompute_schedule_conflicts
+
+		try:
+			for task in task_by_template.values():
+				recompute_schedule_conflicts(task.name)
+		except Exception as exc:
+			_template_error(
+				"TEMPLATE_IMPORT_FAILED",
+				_("Could not refresh the imported schedule conflicts."),
+				exc,
+			)
+
+	return created
+
+
 @frappe.whitelist()
-def import_project_template(project: str, work_packages=0, stages=0, tasks=0, project_category: str | None = None):
-	"""Import a Project Template into an EXISTING project (⋯ menu → Import project template).
-	Appends the chosen layers — the project's existing Work Packages / Tasks / Stages are kept.
-	Defaults to the project's own Project Category template; pass `project_category` to import a
-	different category's template. Returns {ok, category, work_packages, tasks, stages}."""
-	from frappe.utils import cint
+def import_project_template(
+	project: str,
+	work_packages=0,
+	stages=0,
+	tasks=0,
+	project_category: str | None = None,
+	test_run: int | bool = 0,
+	basis_hash: str | None = None,
+):
+	"""Preview or atomically import a Project Template into an existing project."""
+	cint = frappe.utils.cint
 
 	doc = frappe.get_doc("Project", project)
 	doc.check_permission("write")
@@ -438,13 +720,103 @@ def import_project_template(project: str, work_packages=0, stages=0, tasks=0, pr
 	if not (seed_wps or seed_stages or seed_tasks):
 		frappe.throw(_("Choose at least one of Work Packages, Stages or Tasks to import."))
 
+	for selected, doctype in (
+		(seed_wps, "Work Package"),
+		(seed_stages, "Stage Planning"),
+		(seed_tasks, "Task"),
+	):
+		if selected:
+			frappe.has_permission(doctype, ptype="create", throw=True)
+
 	template = frappe.get_doc("Project Template", template_name)
-	created = _apply_template(doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks))
+	message_log = getattr(frappe.local, "message_log", None)
+	prior_log_len = len(message_log) if isinstance(message_log, list) else None
+	prior_cascade = frappe.flags.get("in_schedule_cascade")
+	savepoint_created = False
+	try:
+		plan = _template_import_plan(doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks))
+		current_basis = hashlib.sha256(
+			json.dumps(
+				{
+					"project": [
+						doc.name,
+						category,
+						doc.company,
+						doc.expected_start_date,
+						doc.expected_end_date,
+					],
+					"template_name": template_name,
+					"template": template.as_dict(),
+					"selection": [bool(seed_wps), bool(seed_stages), bool(seed_tasks)],
+					"plan": plan,
+				},
+				sort_keys=True,
+				default=str,
+			).encode()
+		).hexdigest()
+		if cint(test_run):
+			return {
+				"ok": True,
+				"category": category,
+				"basis_hash": current_basis,
+				"work_packages": len(plan["work_packages_created"]),
+				"tasks": len(plan["task_rows"]),
+				"stages": plan["stage_count"],
+				**{
+					key: plan[key]
+					for key in (
+						"work_packages_created",
+						"work_packages_reused",
+						"task_rows",
+						"dependencies",
+						"computed_finish",
+						"skipped",
+					)
+				},
+			}
+		if basis_hash is not None and basis_hash != current_basis:
+			_template_error(
+				"TEMPLATE_PREVIEW_STALE",
+				_("The project or template has changed. Preview the import again before confirming."),
+			)
+		frappe.db.savepoint("template_import")
+		savepoint_created = True
+		frappe.flags.in_schedule_cascade = True
+		created = _apply_template_import(
+			doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks), plan=plan
+		)
+	except frappe.ValidationError as exc:
+		if savepoint_created:
+			frappe.db.rollback(save_point="template_import")
+		if prior_log_len is not None:
+			del message_log[prior_log_len:]
+		cause = exc.__cause__
+		if cause is not None and not (
+			isinstance(cause, frappe.ValidationError)
+			and len(cause.args) == 1
+			and isinstance(cause.args[0], str)
+		):
+			frappe.log_error(title="Project template import", message=frappe.get_traceback())
+		frappe.throw(frappe.utils.strip_html_tags(str(exc)).strip(), frappe.ValidationError)
+	except Exception as exc:
+		if savepoint_created:
+			frappe.db.rollback(save_point="template_import")
+		if prior_log_len is not None:
+			del message_log[prior_log_len:]
+		frappe.log_error(title="Project template import", message=frappe.get_traceback())
+		_template_error(
+			"TEMPLATE_IMPORT_FAILED",
+			_("Could not import this project template. Please try again or contact your administrator."),
+			exc,
+		)
+	finally:
+		frappe.flags.in_schedule_cascade = prior_cascade
+
 	return {"ok": True, "category": category, **created}
 
 
 @frappe.whitelist()
-def get_project_template_summary(project_category: str = None, project_type: str = None):
+def get_project_template_summary(project_category: str | None = None, project_type: str | None = None):
 	"""Preview of the template for a Project Category (used by the create form):
 	its stage names, work-package count and task count. `project_type` is accepted
 	for backward compatibility with older callers."""
