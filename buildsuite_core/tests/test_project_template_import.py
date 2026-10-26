@@ -471,6 +471,39 @@ class TestProjectTemplateImport(unittest.TestCase):
 		self.assertNotIn("1062", str(multi_val.exception))
 		self.assertEqual(len(self.state.error_logs), 1)
 
+	def test_dates_out_of_project_window_are_refused_in_preview_and_commit(self):
+		for start, duration, project_end in (
+			(-1, 4, "2027-01-10"),
+			(2, -1, "2027-01-10"),
+			(2, 4, "2026-01-15"),
+		):
+			for test_run in (1, 0):
+				with self.subTest(start=start, duration=duration, end=project_end, test_run=test_run):
+					self.setUp()
+					self.state.template_tasks["TPL-PRED"].start = start
+					self.state.template_tasks["TPL-PRED"].duration = duration
+					self.state.project.expected_end_date = project_end
+					with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_DATES_OUT_OF_RANGE:"):
+						self._import(test_run=test_run)
+					self.assertEqual(self.state.inserted, [])
+					self.assertEqual(self.module.frappe.db._snapshots, {})
+
+	def test_stage_only_import_refuses_out_of_range_offsets_instead_of_clamping(self):
+		self.state.project.expected_end_date = "2026-01-25"
+		for test_run in (1, 0):
+			with self.subTest(test_run=test_run):
+				with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_DATES_OUT_OF_RANGE:"):
+					self.module.import_project_template("PROJECT-1", stages=1, test_run=test_run)
+				self.assertEqual(self.state.inserted, [])
+
+	def test_dates_exactly_on_project_boundaries_are_allowed(self):
+		self.state.project.expected_end_date = "2026-01-30"
+		self.state.template_tasks["TPL-PRED"].start = 0
+		self.state.template_tasks["TPL-PRED"].duration = 4
+		result = self._import(test_run=0)
+		self.assertEqual(result["task_rows"][0]["exp_start_date"], "2026-01-10")
+		self.assertEqual(result["computed_finish"], "2026-01-30")
+
 	def test_external_template_dependency_keeps_its_specific_reason(self):
 		self.state.template_tasks["TPL-SUCC"].depends_on[0].task = "OUTSIDE-TEMPLATE"
 		for test_run in (1, 0):
