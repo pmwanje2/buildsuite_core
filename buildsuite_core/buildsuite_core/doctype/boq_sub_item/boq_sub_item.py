@@ -13,7 +13,7 @@ class BOQSubItem(Document):
 		# Snapshot the rate + native unit from the Rate Master when linked (not a live
 		# link). Each component keeps its OWN unit (bag / litre / day…), distinct from
 		# the parent BOQ item's UOM that its coefficient converts to.
-		if self.rate_master:
+		if self.rate_master and not self.flags.keep_snapshot:
 			rm = frappe.db.get_value(
 				"Construction Rate Master", self.rate_master, ["current_rate", "uom"], as_dict=True
 			)
@@ -21,7 +21,9 @@ class BOQSubItem(Document):
 				self.rate = rm.current_rate or 0
 				self.uom = rm.uom
 		self.coefficient = flt(self.qty_per_unit)
-		self.amount = flt(self.qty_per_unit) * flt(self.rate)
+		# Clone/revision inserts keep the source's released, persisted snapshot.
+		if not self.flags.keep_snapshot:
+			self.amount = flt(self.qty_per_unit) * flt(self.rate)
 
 		# Inherit the parent item's WP / cost-head stamps when not explicitly set.
 		if self.boq_item and (not self.work_package or not self.cost_head):
