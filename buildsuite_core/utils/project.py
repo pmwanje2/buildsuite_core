@@ -663,7 +663,7 @@ def import_project_template(
 	stages=0,
 	tasks=0,
 	project_category: str | None = None,
-	test_run: int | bool = 1,
+	test_run: int | bool = 0,
 ):
 	"""Preview or atomically import a Project Template into an existing project."""
 	cint = frappe.utils.cint
