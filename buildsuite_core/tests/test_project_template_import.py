@@ -471,6 +471,16 @@ class TestProjectTemplateImport(unittest.TestCase):
 		self.assertNotIn("1062", str(multi_val.exception))
 		self.assertEqual(len(self.state.error_logs), 1)
 
+	def test_external_template_dependency_keeps_its_specific_reason(self):
+		self.state.template_tasks["TPL-SUCC"].depends_on[0].task = "OUTSIDE-TEMPLATE"
+		for test_run in (1, 0):
+			with self.subTest(test_run=test_run):
+				with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_DEPENDENCY_NOT_IN_TEMPLATE:") as caught:
+					self._import(test_run=test_run)
+				self.assertNotIn("TEMPLATE_TASK_PLAN_FAILED", str(caught.exception))
+				self.assertEqual(self.state.inserted, [])
+				self.assertEqual(self.state.error_logs, [])
+
 	def test_unchanged_preview_basis_is_stable_and_can_be_confirmed(self):
 		preview = self._import(test_run=1)
 		self.assertIn("basis_hash", preview)
