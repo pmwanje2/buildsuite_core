@@ -129,8 +129,9 @@ def explode_item(boq_item: str):
 	try:
 		for sub in frappe.get_all("BOQ Sub Item", filters={"boq_item": item.name}, pluck="name"):
 			frappe.delete_doc("BOQ Sub Item", sub, force=True, ignore_permissions=True)
+		rate = 0
 		for c in assembly.components:
-			frappe.get_doc(
+			sub = frappe.get_doc(
 				{
 					"doctype": "BOQ Sub Item",
 					"boq": item.boq,
@@ -144,8 +145,10 @@ def explode_item(boq_item: str):
 					"source_assembly": assembly.name,
 				}
 			).insert(ignore_permissions=True)
+			# Sub-item amounts are per BOQ unit, using the inserted rate snapshot.
+			rate += flt(sub.amount)
 		item.quantity_source = "Assembly"
-		item.rate = assembly.rate_per_unit
+		item.rate = rate
 		item.planned_qty = driving
 		item.driving_qty = driving
 		item.save(ignore_permissions=True)
