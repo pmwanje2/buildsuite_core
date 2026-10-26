@@ -324,6 +324,20 @@ class TestProjectTemplateImport(unittest.TestCase):
 	def _import(self, **kwargs):
 		return self.module.import_project_template("PROJECT-1", work_packages=1, stages=0, tasks=1, **kwargs)
 
+	def test_project_creation_remains_lenient_and_tasks_remain_undated(self):
+		self.state.project.custom_seed_default_work_packages = 1
+		self.state.project.custom_seed_default_tasks = 1
+		self.state.fail_subject = "Succ"
+
+		self.module.seed_from_template_on_insert(self.state.project)
+
+		tasks = [doc for doc in self.state.inserted if doc.doctype == "Task"]
+		self.assertEqual([task.subject for task in tasks], ["Pred"])
+		self.assertIsNone(tasks[0].get("exp_start_date"))
+		self.assertIsNone(tasks[0].get("exp_end_date"))
+		self.assertEqual(len(self.state.error_logs), 1)
+		self.assertEqual(self.module.frappe.db.rollback_calls, [])
+
 	def test_preview_writes_nothing_and_reports_work_packages_by_code(self):
 		result = self._import(test_run=1)
 
