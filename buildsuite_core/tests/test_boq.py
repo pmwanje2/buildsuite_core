@@ -5,7 +5,8 @@ revisions, approve-supersede and actuals recompute."""
 
 import json
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from buildsuite_core.tests._boq_stub import AssignmentDoc, AssignmentFrappe, ensure_frappe_stub
 
@@ -183,6 +184,36 @@ class TestBOQ(BuildSuiteTestCase):
 		self.assertEqual(frappe.db.count("BOQ Sub Item", {"boq_item": it.name}), 1)
 
 	# --- revisions + workflow ------------------------------------------
+	def test_explode_after_standard_rate_change_does_not_use_stale_assembly_rate(self):
+		p = self._make_project(company=self.company)
+		b = self._boq(p.name)
+		g = self._group(b.name)
+		rm = self._rate_master(rate=100)
+		asm = frappe.get_doc(
+			{
+				"doctype": "Assembly",
+				"assembly_code": f"ZZA-{frappe.generate_hash(length=4)}",
+				"assembly_name": "Standard rate snapshot",
+				"uom": "Nos",
+				"components": [{"resource": rm.name, "coefficient": 3}],
+			}
+		).insert(ignore_permissions=True)
+		self.assertEqual(asm.rate_per_unit, 300)
+		rm.current_rate = 150
+		rm.save(ignore_permissions=True)
+		# Do not re-save the Assembly: its cached rate is intentionally stale.
+		it = self._item(b.name, g.name, 4, 0, assembly=asm.name, driving_qty=4)
+		api.explode_item(it.name)
+		it.reload()
+		subs = frappe.get_all(
+			"BOQ Sub Item", filters={"boq_item": it.name}, fields=["qty", "rate", "amount"]
+		)
+		self.assertEqual(it.rate, 450)
+		self.assertEqual(it.rate, sum(row.qty * row.rate for row in subs) / it.planned_qty)
+		self.assertEqual(it.rate, sum(row.amount for row in subs))
+		self.assertEqual(it.planned_amount, 1800)
+		self.assertEqual(frappe.db.get_value("Assembly", asm.name, "rate_per_unit"), 300)
+
 	def test_create_revision_clones_tree(self):
 		p = self._make_project(company=self.company)
 		b = self._boq(p.name)
@@ -471,6 +502,61 @@ class TestBOQ(BuildSuiteTestCase):
 		by_wp = {r.work_package: r for r in b.wp_summaries}
 		self.assertEqual(by_wp[wp_a.name].planned_amount, 3000)
 		self.assertEqual(by_wp[wp_b.name].planned_amount, 1000)
+
+
+class TestExplodeItemRates(unittest.TestCase):
+	"""Exercise the real endpoint with only the database/document boundary doubled."""
+
+	def test_line_rate_uses_inserted_snapshots_not_cached_assembly_total(self):
+		for driving in (4, 0):
+			with self.subTest(driving=driving):
+				item = SimpleNamespace(
+					name="LINE-1", boq="BOQ-1", assembly="ASM-1", driving_qty=driving,
+					planned_qty=driving, work_package=None, cost_head=None, rate=0, save=Mock(),
+				)
+				assembly = SimpleNamespace(
+					name="ASM-1", rate_per_unit=350,
+					components=[
+						SimpleNamespace(resource="RM-1", resource_name="Material", coefficient=3),
+						SimpleNamespace(resource="RM-2", resource_name="Labour", coefficient=0.5),
+					],
+				)
+				# Current standard prices changed after the Assembly was last saved.
+				rates = {"RM-1": 150, "RM-2": 80}
+				inserted = []
+
+				def get_doc(doctype, name=None):
+					if isinstance(doctype, dict):
+						values = doctype
+						row = SimpleNamespace(**values)
+
+						def insert(**_kwargs):
+							row.rate = rates[row.rate_master]
+							row.amount = row.qty_per_unit * row.rate
+							inserted.append(row)
+							return row
+
+						row.insert = insert
+						return row
+					return {
+						("BOQ Item", "LINE-1"): item,
+						("BOQ", "BOQ-1"): SimpleNamespace(status="Draft"),
+						("Assembly", "ASM-1"): assembly,
+					}[(doctype, name)]
+
+				boundary = Mock()
+				boundary.get_doc.side_effect = get_doc
+				boundary.get_all.return_value = []
+				boundary.flags = SimpleNamespace(boq_skip_rollup="prior", get=lambda _key: "prior")
+				with patch.object(api, "frappe", boundary), patch.object(api, "recompute_boq"):
+					api.explode_item("LINE-1")
+				self.assertEqual(item.rate, 490)
+				self.assertEqual(item.rate, sum(row.amount for row in inserted))
+				if driving:
+					self.assertEqual(item.rate, sum(row.qty * row.rate for row in inserted) / driving)
+				self.assertEqual(assembly.rate_per_unit, 350)
+				self.assertEqual(item.planned_qty, driving)
+				self.assertEqual(boundary.flags.boq_skip_rollup, "prior")
 
 
 class TestAssignWorkPackages(unittest.TestCase):
