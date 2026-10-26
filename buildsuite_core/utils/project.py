@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -666,6 +669,7 @@ def import_project_template(
 	tasks=0,
 	project_category: str | None = None,
 	test_run: int | bool = 0,
+	basis_hash: str | None = None,
 ):
 	"""Preview or atomically import a Project Template into an existing project."""
 	cint = frappe.utils.cint
@@ -699,10 +703,24 @@ def import_project_template(
 	savepoint_created = False
 	try:
 		plan = _template_import_plan(doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks))
+		current_basis = hashlib.sha256(
+			json.dumps(
+				{
+					"project": [doc.name, category, doc.company, doc.expected_start_date, doc.expected_end_date],
+					"template_name": template_name,
+					"template": template.as_dict(),
+					"selection": [bool(seed_wps), bool(seed_stages), bool(seed_tasks)],
+					"plan": plan,
+				},
+				sort_keys=True,
+				default=str,
+			).encode()
+		).hexdigest()
 		if cint(test_run):
 			return {
 				"ok": True,
 				"category": category,
+				"basis_hash": current_basis,
 				"work_packages": len(plan["work_packages_created"]),
 				"tasks": len(plan["task_rows"]),
 				"stages": plan["stage_count"],
@@ -718,6 +736,11 @@ def import_project_template(
 					)
 				},
 			}
+		if basis_hash is not None and basis_hash != current_basis:
+			_template_error(
+				"TEMPLATE_PREVIEW_STALE",
+				_("The project or template has changed. Preview the import again before confirming."),
+			)
 		frappe.db.savepoint("template_import")
 		savepoint_created = True
 		frappe.flags.in_schedule_cascade = True
