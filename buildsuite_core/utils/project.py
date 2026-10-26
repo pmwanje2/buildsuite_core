@@ -649,6 +649,12 @@ def _apply_template_import(project_doc, template, seed_wps, seed_stages, seed_ta
 				exc,
 			)
 
+	if task_by_template:
+		from buildsuite_core.api.schedule_engine import recompute_schedule_conflicts
+
+		for task in task_by_template.values():
+			recompute_schedule_conflicts(task.name)
+
 	return created
 
 
