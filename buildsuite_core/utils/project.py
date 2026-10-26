@@ -331,6 +331,91 @@ def seed_from_template_on_insert(doc, method=None):
 	_apply_template(doc, template, seed_wps, seed_stages, seed_tasks)
 
 
+def _apply_template(project_doc, template, seed_wps, seed_stages, seed_tasks):
+	"""Append a Project Template's Work Packages, Tasks and Stages onto a project — the single
+	seeding path shared by the create-time hook AND the post-creation import (⋯ menu). Existing
+	data is always kept: a Work Package whose `code` already exists on the project is reused
+	(never duplicated), and tasks/stages are appended. Tasks link to their Work Package by the
+	template's work-package code, resolving to an existing WP when one is present. Returns
+	{"work_packages", "tasks", "stages"} — the count of each NEWLY created."""
+	created = {"work_packages": 0, "tasks": 0, "stages": 0}
+
+	# Existing Work Packages by code, so a re-import reuses them (keep both, no duplicate code)
+	# and tasks can link to an existing WP even when Work Packages aren't being (re)imported.
+	wp_by_code = {
+		wp.code: wp.name
+		for wp in frappe.get_all(
+			"Work Package", filters={"project": project_doc.name}, fields=["name", "code"]
+		)
+		if wp.code
+	}
+
+	# --- Work Packages -----------------------------------------------------
+	if seed_wps:
+		for row in sorted(template.custom_work_packages, key=lambda r: r.sort_order or 0):
+			if row.code in wp_by_code:
+				continue  # keep the existing Work Package with this code
+			try:
+				wp = frappe.get_doc(
+					{
+						"doctype": "Work Package",
+						"project": project_doc.name,
+						"code": row.code,
+						"work_package_name": row.work_package_name,
+						"budget": row.budget or 0,
+						"description": row.description,
+						"status": "Planned",
+					}
+				).insert(ignore_permissions=True)
+				wp_by_code[row.code] = wp.name
+				created["work_packages"] += 1
+			except Exception:
+				frappe.log_error(
+					frappe.get_traceback(),
+					f'BuildSuite: seed work package "{row.code}" for project "{project_doc.name}"',
+				)
+
+	# --- Tasks (undated; scheduled later on the Gantt) — linked to their WP ---
+	# Remember which seeded tasks belong to which template stage so the stages below can pick
+	# them up into their stage_planning_tasks list.
+	tasks_by_stage = {}
+	if seed_tasks:
+		for row in template.tasks:
+			try:
+				tt = frappe.get_doc("Task", row.task)  # the template Task
+				task = frappe.get_doc(
+					{
+						"doctype": "Task",
+						"project": project_doc.name,
+						"subject": tt.subject,
+						"priority": tt.priority or "Medium",
+						"expected_time": tt.expected_time or 0,
+						"work_package": wp_by_code.get(row.get("custom_work_package_code")),
+						"task_status": "Yet To Start",
+					}
+				).insert(ignore_permissions=True)
+				created["tasks"] += 1
+				stage = row.get("custom_stage")
+				if stage:
+					tasks_by_stage.setdefault(stage, []).append(task.name)
+			except Exception:
+				frappe.log_error(
+					frappe.get_traceback(),
+					f'BuildSuite: seed task "{row.task}" for project "{project_doc.name}"',
+				)
+
+	# --- Stages (planned dates from the template offsets, clamped to bounds) ---
+	if seed_stages:
+		try:
+			created["stages"] = _seed_stages_from_template(project_doc, template, tasks_by_stage)
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(), f'BuildSuite: seed stages for project "{project_doc.name}"'
+			)
+
+	return created
+
+
 def _template_value(row, field, default=None):
 	if hasattr(row, "get"):
 		return row.get(field, default)
@@ -464,11 +549,10 @@ def _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tas
 	}
 
 
-def _apply_template(project_doc, template, seed_wps, seed_stages, seed_tasks, plan=None):
+def _apply_template_import(project_doc, template, seed_wps, seed_stages, seed_tasks, plan=None):
 	"""Append a Project Template's Work Packages, dated Tasks and Stages.
 
-	This is shared by create-time seeding and the explicit import endpoint. It is
-	strict: the caller's transaction owns rollback, so no row failure is swallowed.
+	Only the explicit import is strict; create-time seeding stays lenient.
 	"""
 	plan = plan or _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tasks)
 	created = {
@@ -626,7 +710,7 @@ def import_project_template(
 	frappe.db.savepoint("template_import")
 	frappe.flags.in_schedule_cascade = True
 	try:
-		created = _apply_template(
+		created = _apply_template_import(
 			doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks), plan=plan
 		)
 	except frappe.ValidationError:
