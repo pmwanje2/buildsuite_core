@@ -4,7 +4,7 @@
 
 import sys
 import unittest
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
@@ -52,7 +52,9 @@ class _StoredDoc(SimpleNamespace):
 		# Document.insert() returns the UNROUNDED object, not a database reload.
 		for field in ("rate", "amount", "planned_amount", "actual_amount"):
 			if values.get(field) is not None:
-				values[field] = Decimal(str(values[field])).quantize(Decimal("0.000000001"))
+				values[field] = Decimal(str(values[field])).quantize(
+					Decimal("0.000000001"), rounding=ROUND_HALF_UP
+				)
 		self._store.rows[self.doctype, self.name] = values
 		return self
 
@@ -141,6 +143,27 @@ class TestPersistedBOQSnapshots(unittest.TestCase):
 		self.assertEqual(line.rate, Decimal("0.666666668"))
 		self.assertEqual(line.rate, sum(amounts))
 		self.assertEqual(line.planned_amount, Decimal("6666666.680000000"))
+
+	def test_explode_half_tie_uses_storage_not_bankers_accounting_rounding(self):
+		# Bounded flt seam: the site's Banker's Rounding resolves exact ties
+		# to even, independently of MariaDB's HALF_UP decimal persistence.
+		def bankers_flt(value, precision=None):
+			number = float(value or 0)
+			if precision is not None:
+				return float(Decimal(str(number)).quantize(
+					Decimal(1).scaleb(-precision), rounding=ROUND_HALF_EVEN
+				))
+			return number
+
+		with patch.object(api, "flt", bankers_flt):
+			self._source(coefficient=0.5, rate=1.000000001, qty=10000000)
+
+		line = self.store.get_doc("BOQ Item", "LINE-1")
+		amounts = self.store.get_all("BOQ Sub Item", filters={"boq_item": line.name}, pluck="amount")
+		self.assertEqual(amounts, [Decimal("0.500000001")])
+		self.assertEqual(line.rate, Decimal("0.500000001"))
+		self.assertEqual(line.rate, sum(amounts))
+		self.assertEqual(line.planned_amount, Decimal("5000000.010000000"))
 
 	def _assert_copy_preserves_snapshot(self, mode):
 		self._source()
