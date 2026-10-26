@@ -41,6 +41,13 @@ class Row:
 	def get(self, key, default=None):
 		return self.__dict__.get(key, default)
 
+	def as_dict(self):
+		return {
+			key: [row.as_dict() if isinstance(row, Row) else row for row in value]
+			if isinstance(value, list) else value
+			for key, value in self.__dict__.items()
+		}
+
 
 class ProjectTemplateTaskRow(Row):
 	"""Enforce ERPNext Project Template Task + BuildSuite custom field names."""
@@ -463,6 +470,46 @@ class TestProjectTemplateImport(unittest.TestCase):
 			self._import(test_run=0)
 		self.assertNotIn("1062", str(multi_val.exception))
 		self.assertEqual(len(self.state.error_logs), 1)
+
+	def test_unchanged_preview_basis_is_stable_and_can_be_confirmed(self):
+		preview = self._import(test_run=1)
+		self.assertIn("basis_hash", preview)
+		self.assertRegex(preview["basis_hash"], r"^[0-9a-f]{64}$")
+		self.assertEqual(preview["basis_hash"], self._import(test_run=1)["basis_hash"])
+		result = self._import(test_run=0, basis_hash=preview["basis_hash"])
+		self.assertEqual(result["tasks"], 2)
+
+	def test_stale_preview_is_refused_before_savepoint_or_writes(self):
+		changes = (
+			lambda: setattr(self.state.project, "expected_start_date", "2026-01-11"),
+			lambda: setattr(self.state.project, "expected_end_date", "2027-02-10"),
+			lambda: setattr(self.state.project, "company", "Company B"),
+			lambda: setattr(self.state.template, "modified", "2026-10-26 12:00:00"),
+			lambda: setattr(self.state.template.custom_work_packages[1], "budget", 99),
+			lambda: setattr(self.state.template.custom_stages[0], "description", "Revised"),
+			lambda: setattr(self.state.template_tasks["TPL-PRED"], "duration", 5),
+			lambda: setattr(self.state.template_tasks["TPL-SUCC"].depends_on[0], "lag_days", 5),
+			lambda: self.state.existing_wps.append(Row(name="OTHER", code="WP-NEW")),
+		)
+		for index, change in enumerate(changes):
+			with self.subTest(change=index):
+				self.setUp()
+				preview = self._import(test_run=1)
+				self.assertIn("basis_hash", preview)
+				change()
+				with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_PREVIEW_STALE:"):
+					self._import(test_run=0, basis_hash=preview["basis_hash"])
+				self.assertEqual(self.state.inserted, [])
+				self.assertEqual(self.module.frappe.db._snapshots, {})
+
+	def test_changed_layer_selection_invalidates_preview_basis(self):
+		preview = self._import(test_run=1)
+		self.assertIn("basis_hash", preview)
+		with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_PREVIEW_STALE:"):
+			self.module.import_project_template(
+				"PROJECT-1", work_packages=1, test_run=0, basis_hash=preview["basis_hash"]
+			)
+		self.assertEqual(self.state.inserted, [])
 
 	def test_each_selected_layer_requires_create_permission_before_any_write(self):
 		for doctype, options in (
