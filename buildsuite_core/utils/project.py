@@ -583,8 +583,6 @@ def _apply_template_import(project_doc, template, seed_wps, seed_stages, seed_ta
 					"status": "Planned",
 				}
 			).insert(ignore_permissions=True)
-		except frappe.ValidationError:
-			raise
 		except Exception as exc:
 			_template_error(
 				"TEMPLATE_WORK_PACKAGE_CREATE_FAILED",
