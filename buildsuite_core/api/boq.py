@@ -6,6 +6,8 @@ Assembly explosion, revisions, clone, template import and actuals recompute.
 Reads go through the standard data adapter; only these mutations need the API.
 """
 
+from decimal import ROUND_HALF_UP, Decimal
+
 import frappe
 from frappe import _
 from frappe.utils import cint, flt, today
@@ -129,7 +131,7 @@ def explode_item(boq_item: str):
 	try:
 		for sub in frappe.get_all("BOQ Sub Item", filters={"boq_item": item.name}, pluck="name"):
 			frappe.delete_doc("BOQ Sub Item", sub, force=True, ignore_permissions=True)
-		rate = 0
+		rate = Decimal(0)
 		for c in assembly.components:
 			sub = frappe.get_doc(
 				{
@@ -146,8 +148,8 @@ def explode_item(boq_item: str):
 				}
 			).insert(ignore_permissions=True)
 			# Document.insert() leaves the object unrounded; Currency storage is
-			# decimal(21,9). Sum the per-unit snapshots at their persisted scale.
-			rate += flt(sub.amount, 9)
+			# decimal(21,9), HALF_UP, independent of accounting rounding settings.
+			rate += Decimal(str(sub.amount)).quantize(Decimal("1e-9"), rounding=ROUND_HALF_UP)
 		item.quantity_source = "Assembly"
 		item.rate = rate
 		item.planned_qty = driving
