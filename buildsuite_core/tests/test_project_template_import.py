@@ -80,7 +80,10 @@ class FakeDoc:
 		getattr(self, field).append(Row(**values))
 
 	def insert(self, **_kwargs):
-		if self.doctype == "Task" and self.subject == self._state.fail_subject:
+		if (
+			self.doctype == "Task" and self.subject == self._state.fail_subject
+			or self.doctype == "Work Package" and self.code == self._state.fail_wp_code
+		):
 			self._state.frappe_ref.local.message_log.append("leaked validation log")
 			raise self._state.fail_error
 		self._state.cascade_flags_seen.append(bool(self._state.frappe_ref.flags.get("in_schedule_cascade")))
@@ -134,6 +137,7 @@ class FakeState:
 		self.saved = []
 		self.sequence = 0
 		self.fail_subject = None
+		self.fail_wp_code = None
 		self.fail_error = RuntimeError("raw database detail must not reach the caller")
 		self.error_logs = []
 		self.cascade_flags_seen = []
@@ -432,6 +436,23 @@ class TestProjectTemplateImport(unittest.TestCase):
 			self._import(test_run=0)
 		self.assertNotIn("1062", str(multi_val.exception))
 		self.assertEqual(len(self.state.error_logs), 1)
+
+	def test_work_package_validation_errors_have_safe_stable_reason(self):
+		self.state.fail_wp_code = "WP-NEW"
+		for error, detail in (
+			(FakeValidationError("<b>Budget is locked</b>"), "Budget is locked"),
+			(FakeValidationError("Duplicate private SQL", 1062), None),
+		):
+			with self.subTest(error=error.args):
+				self.state.fail_error = error
+				with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_WORK_PACKAGE_CREATE_FAILED:") as caught:
+					self._import(test_run=0)
+				if detail:
+					self.assertIn(detail, str(caught.exception))
+				self.assertNotIn("<b>", str(caught.exception))
+				self.assertNotIn("1062", str(caught.exception))
+				self.assertNotIn("private SQL", str(caught.exception))
+				self.assertEqual(self.state.inserted, [])
 
 	def test_task_override_skips_cascade_when_instance_flag_is_set(self):
 		module, frappe = _load_task_override_module()
