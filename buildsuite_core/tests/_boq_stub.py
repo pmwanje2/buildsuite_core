@@ -19,6 +19,11 @@ def _cint(value, default=0):
 		return default
 
 
+def _flt(value, precision=None):
+	value = float(value or 0)
+	return round(value, precision) if precision is not None else value
+
+
 def _throw(msg, exc=ValueError):
 	if isinstance(exc, type) and issubclass(exc, BaseException):
 		raise exc(msg)
@@ -53,7 +58,7 @@ def ensure_frappe_stub():
 		frappe.tests.UnitTestCase = unittest.TestCase
 		frappe_utils = types.ModuleType("frappe.utils")
 		frappe_utils.cint = _cint
-		frappe_utils.flt = lambda value: float(value or 0)
+		frappe_utils.flt = _flt
 		frappe_utils.today = lambda: "2026-10-24"
 		frappe_utils.strip_html_tags = _strip_html_tags
 		sys.modules["frappe"] = frappe
