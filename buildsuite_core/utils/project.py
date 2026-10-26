@@ -543,7 +543,11 @@ def _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tas
 		if (
 			(start and end and getdate(start) > getdate(end))
 			or (start and getdate(start) < getdate(base))
-			or (end and project_doc.expected_end_date and getdate(end) > getdate(project_doc.expected_end_date))
+			or (
+				end
+				and project_doc.expected_end_date
+				and getdate(end) > getdate(project_doc.expected_end_date)
+			)
 		):
 			_template_error(
 				"TEMPLATE_DATES_OUT_OF_RANGE",
@@ -727,7 +731,13 @@ def import_project_template(
 		current_basis = hashlib.sha256(
 			json.dumps(
 				{
-					"project": [doc.name, category, doc.company, doc.expected_start_date, doc.expected_end_date],
+					"project": [
+						doc.name,
+						category,
+						doc.company,
+						doc.expected_start_date,
+						doc.expected_end_date,
+					],
 					"template_name": template_name,
 					"template": template.as_dict(),
 					"selection": [bool(seed_wps), bool(seed_stages), bool(seed_tasks)],

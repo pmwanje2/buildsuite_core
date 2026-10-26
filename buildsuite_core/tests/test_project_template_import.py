@@ -44,7 +44,8 @@ class Row:
 	def as_dict(self):
 		return {
 			key: [row.as_dict() if isinstance(row, Row) else row for row in value]
-			if isinstance(value, list) else value
+			if isinstance(value, list)
+			else value
 			for key, value in self.__dict__.items()
 		}
 
@@ -87,9 +88,8 @@ class FakeDoc:
 		getattr(self, field).append(Row(**values))
 
 	def insert(self, **_kwargs):
-		if (
-			self.doctype == "Task" and self.subject == self._state.fail_subject
-			or self.doctype == "Work Package" and self.code == self._state.fail_wp_code
+		if (self.doctype == "Task" and self.subject == self._state.fail_subject) or (
+			self.doctype == "Work Package" and self.code == self._state.fail_wp_code
 		):
 			self._state.frappe_ref.local.message_log.append("leaked validation log")
 			raise self._state.fail_error
@@ -228,6 +228,7 @@ class FakeState:
 		frappe.local = types.SimpleNamespace(message_log=["prior message"])
 		frappe.db = FakeDb(self)
 		frappe.whitelist = lambda: lambda function: function
+
 		def throw(message, error_type=None, **_kwargs):
 			frappe.local.message_log.append({"message": message})
 			raise (error_type or FakeImportError)(message)
@@ -353,16 +354,24 @@ class TestProjectTemplateImport(unittest.TestCase):
 		schedule = types.ModuleType("buildsuite_core.api.schedule_engine")
 
 		def recompute(task_name):
-			self.state.conflict_snapshots.append((
-				task_name,
-				[(doc.subject, len(doc.depends_on)) for doc in self.state.inserted if doc.doctype == "Task"],
-			))
+			self.state.conflict_snapshots.append(
+				(
+					task_name,
+					[
+						(doc.subject, len(doc.depends_on))
+						for doc in self.state.inserted
+						if doc.doctype == "Task"
+					],
+				)
+			)
 			if self.state.fail_conflicts:
 				raise RuntimeError("private conflict SQL")
 
 		schedule.recompute_schedule_conflicts = recompute
 		with patch.dict(sys.modules, {"buildsuite_core.api.schedule_engine": schedule}):
-			return self.module.import_project_template("PROJECT-1", work_packages=1, stages=0, tasks=1, **kwargs)
+			return self.module.import_project_template(
+				"PROJECT-1", work_packages=1, stages=0, tasks=1, **kwargs
+			)
 
 	def test_project_creation_remains_lenient_and_tasks_remain_undated(self):
 		self.state.project.custom_seed_default_work_packages = 1
@@ -460,9 +469,7 @@ class TestProjectTemplateImport(unittest.TestCase):
 			self._import(test_run=0)
 		self.assertIn("Start date is in a closed period", str(single_val.exception))
 		self.assertNotIn("<b>", str(single_val.exception))
-		self.assertEqual(
-			self.module.frappe.local.message_log[-1], {"message": str(single_val.exception)}
-		)
+		self.assertEqual(self.module.frappe.local.message_log[-1], {"message": str(single_val.exception)})
 		self.assertEqual(self.state.error_logs, [])
 
 		self.state.fail_error = FakeValidationError("Duplicate entry", 1062)
@@ -508,7 +515,9 @@ class TestProjectTemplateImport(unittest.TestCase):
 		self.state.template_tasks["TPL-SUCC"].depends_on[0].task = "OUTSIDE-TEMPLATE"
 		for test_run in (1, 0):
 			with self.subTest(test_run=test_run):
-				with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_DEPENDENCY_NOT_IN_TEMPLATE:") as caught:
+				with self.assertRaisesRegex(
+					FakeValidationError, "^TEMPLATE_DEPENDENCY_NOT_IN_TEMPLATE:"
+				) as caught:
 					self._import(test_run=test_run)
 				self.assertNotIn("TEMPLATE_TASK_PLAN_FAILED", str(caught.exception))
 				self.assertEqual(self.state.inserted, [])
@@ -621,7 +630,9 @@ class TestProjectTemplateImport(unittest.TestCase):
 		):
 			with self.subTest(error=error.args):
 				self.state.fail_error = error
-				with self.assertRaisesRegex(FakeValidationError, "^TEMPLATE_WORK_PACKAGE_CREATE_FAILED:") as caught:
+				with self.assertRaisesRegex(
+					FakeValidationError, "^TEMPLATE_WORK_PACKAGE_CREATE_FAILED:"
+				) as caught:
 					self._import(test_run=0)
 				if detail:
 					self.assertIn(detail, str(caught.exception))
