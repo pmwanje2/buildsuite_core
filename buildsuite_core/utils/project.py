@@ -429,12 +429,10 @@ def _template_error(reason, message, exc=None):
 			detail = frappe.utils.strip_html_tags(str(exc)).strip()
 			if detail:
 				message = f"{message} {detail}"
-		else:
-			frappe.log_error(
-				title="Project template import",
-				message=frappe.get_traceback(),
-			)
-	frappe.throw(f"{reason}: {message}", frappe.ValidationError)
+	try:
+		frappe.throw(f"{reason}: {message}", frappe.ValidationError)
+	except frappe.ValidationError as cleaned:
+		raise cleaned from exc
 
 
 def _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tasks):
@@ -681,45 +679,56 @@ def import_project_template(
 		frappe.throw(_("Choose at least one of Work Packages, Stages or Tasks to import."))
 
 	template = frappe.get_doc("Project Template", template_name)
-	plan = _template_import_plan(doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks))
-	if cint(test_run):
-		return {
-			"ok": True,
-			"category": category,
-			"work_packages": len(plan["work_packages_created"]),
-			"tasks": len(plan["task_rows"]),
-			"stages": plan["stage_count"],
-			**{
-				key: plan[key]
-				for key in (
-					"work_packages_created",
-					"work_packages_reused",
-					"task_rows",
-					"dependencies",
-					"computed_finish",
-					"skipped",
-				)
-			},
-		}
-
 	message_log = getattr(frappe.local, "message_log", None)
 	prior_log_len = len(message_log) if isinstance(message_log, list) else None
 	prior_cascade = frappe.flags.get("in_schedule_cascade")
-	frappe.db.savepoint("template_import")
-	frappe.flags.in_schedule_cascade = True
+	savepoint_created = False
 	try:
+		plan = _template_import_plan(doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks))
+		if cint(test_run):
+			return {
+				"ok": True,
+				"category": category,
+				"work_packages": len(plan["work_packages_created"]),
+				"tasks": len(plan["task_rows"]),
+				"stages": plan["stage_count"],
+				**{
+					key: plan[key]
+					for key in (
+						"work_packages_created",
+						"work_packages_reused",
+						"task_rows",
+						"dependencies",
+						"computed_finish",
+						"skipped",
+					)
+				},
+			}
+		frappe.db.savepoint("template_import")
+		savepoint_created = True
+		frappe.flags.in_schedule_cascade = True
 		created = _apply_template_import(
 			doc, template, bool(seed_wps), bool(seed_stages), bool(seed_tasks), plan=plan
 		)
 	except frappe.ValidationError as exc:
-		frappe.db.rollback(save_point="template_import")
+		if savepoint_created:
+			frappe.db.rollback(save_point="template_import")
 		if prior_log_len is not None:
 			del message_log[prior_log_len:]
+		cause = exc.__cause__
+		if cause is not None and not (
+			isinstance(cause, frappe.ValidationError)
+			and len(cause.args) == 1
+			and isinstance(cause.args[0], str)
+		):
+			frappe.log_error(title="Project template import", message=frappe.get_traceback())
 		frappe.throw(frappe.utils.strip_html_tags(str(exc)).strip(), frappe.ValidationError)
 	except Exception as exc:
-		frappe.db.rollback(save_point="template_import")
+		if savepoint_created:
+			frappe.db.rollback(save_point="template_import")
 		if prior_log_len is not None:
 			del message_log[prior_log_len:]
+		frappe.log_error(title="Project template import", message=frappe.get_traceback())
 		_template_error(
 			"TEMPLATE_IMPORT_FAILED",
 			_("Could not import this project template. Please try again or contact your administrator."),
