@@ -115,6 +115,7 @@ class FakeDb:
 	def savepoint(self, name):
 		self._snapshots[name] = (
 			list(self._state.inserted),
+			list(self._state.saved),
 			self._state.sequence,
 			list(self._state.error_logs),
 		)
@@ -122,8 +123,9 @@ class FakeDb:
 	def rollback(self, *, save_point=None):
 		self.rollback_calls.append(save_point)
 		if save_point in self._snapshots:
-			inserted, sequence, error_logs = self._snapshots[save_point]
+			inserted, saved, sequence, error_logs = self._snapshots[save_point]
 			self._state.inserted = inserted
+			self._state.saved = saved
 			self._state.sequence = sequence
 			self._state.error_logs = error_logs
 
@@ -143,6 +145,8 @@ class FakeState:
 		self.fail_error = RuntimeError("raw database detail must not reach the caller")
 		self.error_logs = []
 		self.cascade_flags_seen = []
+		self.conflict_snapshots = []
+		self.fail_conflicts = False
 		self.frappe_ref = None
 
 		# The template Task fields below are deliberately native ERPNext fields:
@@ -330,7 +334,19 @@ class TestProjectTemplateImport(unittest.TestCase):
 		self.module = _load_project_module(self.state)
 
 	def _import(self, **kwargs):
-		return self.module.import_project_template("PROJECT-1", work_packages=1, stages=0, tasks=1, **kwargs)
+		schedule = types.ModuleType("buildsuite_core.api.schedule_engine")
+
+		def recompute(task_name):
+			self.state.conflict_snapshots.append((
+				task_name,
+				[(doc.subject, len(doc.depends_on)) for doc in self.state.inserted if doc.doctype == "Task"],
+			))
+			if self.state.fail_conflicts:
+				raise RuntimeError("private conflict SQL")
+
+		schedule.recompute_schedule_conflicts = recompute
+		with patch.dict(sys.modules, {"buildsuite_core.api.schedule_engine": schedule}):
+			return self.module.import_project_template("PROJECT-1", work_packages=1, stages=0, tasks=1, **kwargs)
 
 	def test_project_creation_remains_lenient_and_tasks_remain_undated(self):
 		self.state.project.custom_seed_default_work_packages = 1
@@ -438,6 +454,28 @@ class TestProjectTemplateImport(unittest.TestCase):
 			self._import(test_run=0)
 		self.assertNotIn("1062", str(multi_val.exception))
 		self.assertEqual(len(self.state.error_logs), 1)
+
+	def test_conflicts_are_recomputed_only_after_all_dependencies_are_copied(self):
+		self._import(test_run=1)
+		self.assertEqual(self.state.conflict_snapshots, [])
+		self._import(test_run=0)
+		self.assertEqual(len(self.state.conflict_snapshots), 2)
+		self.assertEqual(
+			{root for root, _ in self.state.conflict_snapshots},
+			{doc.name for doc in self.state.inserted if doc.doctype == "Task"},
+		)
+		for _, tasks in self.state.conflict_snapshots:
+			self.assertEqual(tasks, [("Pred", 0), ("Succ", 1)])
+
+	def test_conflict_recompute_failure_rolls_back_the_whole_import(self):
+		self.state.fail_conflicts = True
+		with self.assertRaisesRegex(FakeValidationError, "TEMPLATE_IMPORT_FAILED") as caught:
+			self._import(test_run=0)
+		self.assertNotIn("private conflict SQL", str(caught.exception))
+		self.assertEqual(self.state.inserted, [])
+		self.assertEqual(self.state.saved, [])
+		self.assertEqual(len(self.state.error_logs), 1)
+		self.assertFalse(self.module.frappe.flags.in_schedule_cascade)
 
 	def test_unexpected_error_log_survives_template_savepoint_rollback(self):
 		self.state.fail_subject = "Succ"
