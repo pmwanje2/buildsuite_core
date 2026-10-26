@@ -210,9 +210,11 @@ class FakeState:
 		frappe.local = types.SimpleNamespace(message_log=["prior message"])
 		frappe.db = FakeDb(self)
 		frappe.whitelist = lambda: lambda function: function
-		frappe.throw = lambda message, error_type=None, **_kwargs: (_ for _ in ()).throw(
-			(error_type or FakeImportError)(message)
-		)
+		def throw(message, error_type=None, **_kwargs):
+			frappe.local.message_log.append({"message": message})
+			raise (error_type or FakeImportError)(message)
+
+		frappe.throw = throw
 		frappe.get_traceback = lambda: "traceback"
 		frappe.log_error = lambda *args, **kwargs: self.error_logs.append((args, kwargs))
 		frappe.get_all = self.get_all
@@ -406,7 +408,10 @@ class TestProjectTemplateImport(unittest.TestCase):
 		self.assertEqual(self.state.inserted, [])
 		self.assertEqual(self.state.saved, [])
 		self.assertEqual(self.module.frappe.db.rollback_calls, ["template_import"])
-		self.assertEqual(self.module.frappe.local.message_log, ["prior message"])
+		self.assertEqual(
+			self.module.frappe.local.message_log,
+			["prior message", {"message": str(raised.exception)}],
+		)
 		self.assertEqual(len(self.state.error_logs), 1)
 
 		# Single-string ValidationError strips HTML and skips error logging, while
@@ -417,6 +422,9 @@ class TestProjectTemplateImport(unittest.TestCase):
 			self._import(test_run=0)
 		self.assertIn("Start date is in a closed period", str(single_val.exception))
 		self.assertNotIn("<b>", str(single_val.exception))
+		self.assertEqual(
+			self.module.frappe.local.message_log[-1], {"message": str(single_val.exception)}
+		)
 		self.assertEqual(self.state.error_logs, [])
 
 		self.state.fail_error = FakeValidationError("Duplicate entry", 1062)
