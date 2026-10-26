@@ -147,6 +147,7 @@ class FakeState:
 		self.cascade_flags_seen = []
 		self.conflict_snapshots = []
 		self.fail_conflicts = False
+		self.denied_creates = set()
 		self.frappe_ref = None
 
 		# The template Task fields below are deliberately native ERPNext fields:
@@ -229,6 +230,14 @@ class FakeState:
 		frappe.log_error = lambda *args, **kwargs: self.error_logs.append((args, kwargs))
 		frappe.get_all = self.get_all
 		frappe.get_doc = self.get_doc
+
+		def has_permission(doctype, ptype=None, throw=False):
+			allowed = not (ptype == "create" and doctype in self.denied_creates)
+			if not allowed and throw:
+				raise PermissionError(f"Cannot create {doctype}")
+			return allowed
+
+		frappe.has_permission = has_permission
 		utils = types.ModuleType("frappe.utils")
 		utils.cint = lambda value: int(value or 0)
 		utils.strip_html_tags = lambda value: str(value).replace("<b>", "").replace("</b>", "")
@@ -454,6 +463,27 @@ class TestProjectTemplateImport(unittest.TestCase):
 			self._import(test_run=0)
 		self.assertNotIn("1062", str(multi_val.exception))
 		self.assertEqual(len(self.state.error_logs), 1)
+
+	def test_each_selected_layer_requires_create_permission_before_any_write(self):
+		for doctype, options in (
+			("Work Package", {"work_packages": 1}),
+			("Stage Planning", {"stages": 1}),
+			("Task", {"tasks": 1}),
+		):
+			for test_run in (1, 0):
+				with self.subTest(doctype=doctype, test_run=test_run):
+					self.state.denied_creates = {doctype}
+					with self.assertRaises(PermissionError):
+						self.module.import_project_template("PROJECT-1", test_run=test_run, **options)
+					self.assertEqual(self.state.inserted, [])
+					self.assertEqual(self.module.frappe.db._snapshots, {})
+
+	def test_unselected_layers_do_not_require_create_permission(self):
+		self.state.denied_creates = {"Task", "Stage Planning"}
+		result = self.module.import_project_template("PROJECT-1", work_packages=1, test_run=0)
+		self.assertEqual(result["work_packages"], 1)
+		self.assertEqual(result["tasks"], 0)
+		self.assertEqual(result["stages"], 0)
 
 	def test_conflicts_are_recomputed_only_after_all_dependencies_are_copied(self):
 		self._import(test_run=1)
