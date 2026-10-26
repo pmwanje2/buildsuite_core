@@ -371,6 +371,13 @@ class TestProjectTemplateImport(unittest.TestCase):
 		self.assertEqual(self.state.inserted, [])
 		self.assertEqual(self.state.saved, [])
 
+	def test_existing_caller_without_test_run_still_imports(self):
+		result = self._import()
+
+		self.assertEqual(result["tasks"], 2)
+		self.assertEqual(len(self.state.inserted), 3)
+		self.assertEqual(len(self.state.saved), 1)
+
 	def test_tasks_use_native_offsets_or_stage_offsets_and_copy_dependencies(self):
 		result = self._import(test_run=0)
 
