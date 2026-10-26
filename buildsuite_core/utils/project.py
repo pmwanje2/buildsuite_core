@@ -514,13 +514,6 @@ def _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tas
 					}
 				)
 				for dependency in template_task.get("depends_on") or []:
-					if dependency.task not in template_task_names:
-						_template_error(
-							"TEMPLATE_DEPENDENCY_NOT_IN_TEMPLATE",
-							_("Task {0} depends on a task that is not in this template.").format(
-								template_task.subject
-							),
-						)
 					dependencies.append(
 						{
 							"task": row.task,
@@ -535,6 +528,13 @@ def _template_import_plan(project_doc, template, seed_wps, seed_stages, seed_tas
 					_("Could not plan task {0}.").format(row.task),
 					exc,
 				)
+
+	for dependency in dependencies:
+		if dependency["depends_on"] not in template_task_names:
+			_template_error(
+				"TEMPLATE_DEPENDENCY_NOT_IN_TEMPLATE",
+				_("Task {0} depends on a task that is not in this template.").format(dependency["task"]),
+			)
 
 	end_dates = [task_row["exp_end_date"] for task_row in task_rows if task_row["exp_end_date"]]
 	computed_finish = max(end_dates) if end_dates else None
