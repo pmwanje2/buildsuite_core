@@ -23,7 +23,7 @@ from buildsuite_core.permissions.setup import BOQ_APPROVE_ROLES
 
 def _require_write(boq):
 	if not frappe.has_permission("BOQ", "write", doc=boq):
-		frappe.throw(_("You are not permitted to modify this BOQ."), frappe.PermissionError)
+		frappe.throw("BOQ_WRITE_NOT_PERMITTED", frappe.PermissionError)
 
 
 def _require_draft(doc):
@@ -689,7 +689,7 @@ def _line_decimal(value):
 		if not number.is_finite() or abs(number) >= Decimal("1e12"):
 			raise InvalidOperation
 		return number
-	except (InvalidOperation, ValueError, TypeError):
+	except InvalidOperation, ValueError, TypeError:
 		_line_values_refuse("BOQ_LINE_VALUE_INVALID")
 
 
@@ -701,13 +701,13 @@ def _line_round(value, doc, field):
 
 
 def _line_values(item):
-	return {
-		**{
-			field: str(_line_round(_line_decimal(item.get(field) or 0), item, field))
-			for field in ("rate", "planned_qty", "planned_amount")
-		},
-		"assembly": item.get("assembly") or None,
-	}
+	values = {"assembly": item.get("assembly") or None}
+	for field in ("rate", "planned_qty", "planned_amount"):
+		stored = _line_decimal(item.get(field) or 0)
+		rounded = _line_round(stored, item, field)
+		# Snapshot inputs can exceed display precision; do not misrepresent them.
+		values[field] = str(stored if field != "planned_amount" and stored != rounded else rounded)
+	return values
 
 
 def _line_current_revision(doc):
@@ -881,16 +881,19 @@ def _line_preview(doc, changes, locked=None):
 		fields = _line_fields(change)
 		if not _line_can_write(item, change):
 			reason = "BOQ_LINE_FIELD_NOT_PERMITTED"
-		elif (
-			"rate" in fields
-			and "assembly" not in change
-			and (item.assembly or frappe.db.count("BOQ Sub Item", {"boq_item": item.name}))
-		):
+		elif "rate" in fields and (item.assembly or frappe.db.count("BOQ Sub Item", {"boq_item": item.name})):
 			reason = "BOQ_LINE_RATE_FROM_BUILDUP"
 		else:
 			try:
 				for field in fields:
 					if field == "assembly":
+						if not frappe.db.exists("Assembly", change[field]):
+							_line_values_refuse("BOQ_LINE_ASSEMBLY_NOT_FOUND")
+						assembly = frappe.get_doc("Assembly", change[field])
+						if not frappe.has_permission("Assembly", "read", doc=assembly):
+							_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED")
+						if assembly.get("disabled"):
+							_line_values_refuse("BOQ_LINE_ASSEMBLY_DISABLED")
 						after[field] = change[field]
 						continue
 					if "rate_change_percent" in change:
@@ -905,11 +908,11 @@ def _line_preview(doc, changes, locked=None):
 					if "rate_change_percent" not in change and value != rounded:
 						_line_values_refuse("BOQ_LINE_PRECISION_EXCEEDED")
 					after[field] = str(rounded)
-				# Untouched snapshots may have more digits than display precision.
-				# Preserve them, and sum native decimal(21,9) amounts for BOQ totals.
+				# Mirror BOQItem.validate's float product and decimal(21,9) storage,
+				# including binary half-cent drift; keep untouched snapshot inputs.
 				rate = after["rate"] if "rate" in fields else item.rate
 				qty = after["planned_qty"] if "planned_qty" in fields else item.planned_qty
-				stored_amount = (_line_decimal(rate) * _line_decimal(qty)).quantize(
+				stored_amount = _line_decimal(flt(qty) * flt(rate)).quantize(
 					Decimal("1e-9"), rounding=ROUND_HALF_UP
 				)
 				after["planned_amount"] = str(_line_round(stored_amount, item, "planned_amount"))
@@ -983,7 +986,7 @@ def _line_outcome(doc, request_id):
 				signature, _line_outcome_signature(payload)
 			):
 				continue
-		except (ValueError, TypeError):
+		except ValueError, TypeError:
 			continue
 		if (
 			payload.get("contract") == "BOQLineValues.v1"
@@ -1012,6 +1015,16 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 		_line_values_refuse("BOQ_LINES_INVALID")
 	if cint(test_run):
 		return preview_update_line_values(boq, changes, request_id)
+	doc = frappe.get_doc("BOQ", boq)
+	_require_write(doc)
+	# Refuse unauthorized/foreign/missing lines before taking any row lock.
+	names = set(frappe.get_all("BOQ Item", filters={"boq": doc.name}, pluck="name"))
+	for change in changes:
+		if change["boq_item"] not in names:
+			_line_values_refuse("BOQ_LINE_NOT_IN_BOQ")
+		item = frappe.get_doc("BOQ Item", change["boq_item"])
+		if not _line_can_write(item, change):
+			_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
 	doc = frappe.get_doc("BOQ", boq, for_update=True)
 	_require_write(doc)
 	locked = {
@@ -1092,7 +1105,7 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 def get_line_values_outcome(boq, request_id, fingerprint=None):
 	"""Only the transactional BOQ Comment proves commit, never an RQ state."""
 	_line_request_id(request_id)
-	doc = frappe.get_doc("BOQ", boq, for_update=True)
+	doc = frappe.get_doc("BOQ", boq)
 	if not frappe.has_permission("BOQ", "read", doc=doc):
 		_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
 	stored = _line_outcome(doc, request_id)
