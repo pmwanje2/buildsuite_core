@@ -876,6 +876,7 @@ def _line_preview(doc, changes, locked=None):
 			_line_values_refuse("BOQ_LINE_NOT_IN_BOQ")
 		before = _line_values(item)
 		after = dict(before)
+		stored_amount = _line_decimal(item.planned_amount or 0)
 		reason = None
 		fields = _line_fields(change)
 		if not _line_can_write(item, change):
@@ -904,18 +905,20 @@ def _line_preview(doc, changes, locked=None):
 					if "rate_change_percent" not in change and value != rounded:
 						_line_values_refuse("BOQ_LINE_PRECISION_EXCEEDED")
 					after[field] = str(rounded)
-				after["planned_amount"] = str(
-					_line_round(
-						_line_decimal(after["rate"]) * _line_decimal(after["planned_qty"]),
-						item,
-						"planned_amount",
-					)
+				# Untouched snapshots may have more digits than display precision.
+				# Preserve them, and sum native decimal(21,9) amounts for BOQ totals.
+				rate = after["rate"] if "rate" in fields else item.rate
+				qty = after["planned_qty"] if "planned_qty" in fields else item.planned_qty
+				stored_amount = (_line_decimal(rate) * _line_decimal(qty)).quantize(
+					Decimal("1e-9"), rounding=ROUND_HALF_UP
 				)
+				after["planned_amount"] = str(_line_round(stored_amount, item, "planned_amount"))
 			except frappe.ValidationError as exc:
 				reason = str(exc)
 		if reason:
 			after = dict(before)
-		after_amounts[item.name] = _line_decimal(after["planned_amount"])
+			stored_amount = _line_decimal(item.planned_amount or 0)
+		after_amounts[item.name] = stored_amount
 		result["lines"].append(
 			{
 				"boq_item": item.name,
@@ -1042,11 +1045,9 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 	frappe.db.savepoint(savepoint)
 	try:
 		frappe.flags.boq_skip_rollup = True
-		for line in result["lines"]:
-			if line["before"] == line["after"]:
-				continue
+		for line, change in zip(result["lines"], changes, strict=True):
 			item = locked[line["boq_item"]]
-			for field in ("rate", "planned_qty", "assembly"):
+			for field in _line_fields(change):
 				setattr(item, field, line["after"][field])
 			item.save()
 		frappe.flags.boq_skip_rollup = prior_skip
