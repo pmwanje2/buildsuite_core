@@ -7,6 +7,7 @@ Reads go through the standard data adapter; only these mutations need the API.
 """
 
 import hashlib
+import hmac
 import html
 import json
 import re
@@ -744,6 +745,37 @@ def _line_hash(value):
 	return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
+def _line_canonical(changes):
+	canonical = []
+	for row in changes:
+		canonical_row = {}
+		for key, value in row.items():
+			try:
+				canonical_row[key] = str(_line_decimal(value).normalize()) if key not in ("boq_item", "assembly") else value
+			except frappe.ValidationError:
+				canonical_row[key] = str(value)
+		canonical.append(canonical_row)
+	return canonical
+
+
+def _line_fields(change):
+	return ["rate" if key == "rate_change_percent" else key for key in change if key != "boq_item"]
+
+
+def _line_can_write(item, change):
+	return frappe.has_permission("BOQ Item", "write", doc=item) and all(
+		item.has_permlevel_access_to(field, permission_type="write") for field in _line_fields(change)
+	)
+
+
+def _line_outcome_signature(payload):
+	# Reuse native site-local signing, so a user-authored/edited Comment cannot
+	# fabricate success. No staging records, secret storage or new dependency.
+	from frappe.utils.verified_command import get_signed_params
+
+	return get_signed_params(_line_hash(payload))
+
+
 def _line_items(doc, locked=None):
 	# Read all lines, not a permission-filtered subset: partial totals are unsafe.
 	# Explicit BOQ and line permission checks precede disclosure to the caller.
@@ -771,20 +803,11 @@ def _line_preview(doc, changes, locked=None):
 	items = _line_items(doc, locked)
 	by_name = {item.name: item for item in items}
 	state = _line_state(doc, items)
-	canonical = []
-	for row in changes:
-		canonical_row = {}
-		for key, value in row.items():
-			try:
-				canonical_row[key] = str(_line_decimal(value).normalize()) if key not in ("boq_item", "assembly") else value
-			except frappe.ValidationError:
-				canonical_row[key] = str(value)
-		canonical.append(canonical_row)
 	result = {
 		"boq": doc.name, "currency": state["currency"], "owner": doc.owner,
 		"owner_ack_required": doc.owner != frappe.session.user,
 		# Two hashes let outcome recovery compare the snapshot without storing previews.
-		"fingerprint": _line_hash(state) + "." + _line_hash(canonical),
+		"fingerprint": _line_hash(state) + "." + _line_hash(_line_canonical(changes)),
 		"lines": [], "groups": [],
 	}
 	after_amounts = {item.name: _line_decimal(item.planned_amount or 0) for item in items}
@@ -795,12 +818,8 @@ def _line_preview(doc, changes, locked=None):
 		before = _line_values(item)
 		after = dict(before)
 		reason = None
-		fields = [key for key in change if key not in ("boq_item", "rate_change_percent")]
-		if "rate_change_percent" in change:
-			fields.append("rate")
-		if not frappe.has_permission("BOQ Item", "write", doc=item) or any(
-			not item.has_permlevel_access_to(field, permission_type="write") for field in fields
-		):
+		fields = _line_fields(change)
+		if not _line_can_write(item, change):
 			reason = "BOQ_LINE_FIELD_NOT_PERMITTED"
 		elif "rate" in fields and "assembly" not in change and (
 			item.assembly or frappe.db.count("BOQ Sub Item", {"boq_item": item.name})
@@ -854,9 +873,15 @@ def _line_outcome(doc, request_id):
 		fields=["content"]):
 		try:
 			payload = json.loads(html.unescape(re.sub(r"<[^>]*>", "", comment.content)))
+			if not isinstance(payload, dict):
+				continue
+			signature = payload.pop("signature", None)
+			if not isinstance(signature, str) or not hmac.compare_digest(signature, _line_outcome_signature(payload)):
+				continue
 		except (ValueError, TypeError):
 			continue
-		if payload.get("contract") == "BOQLineValues.v1" and payload.get("request_id") == request_id:
+		if (payload.get("contract") == "BOQLineValues.v1" and payload.get("request_id") == request_id
+			and payload.get("outcome", {}).get("boq") == doc.name):
 			return payload["outcome"]
 	return None
 
@@ -884,7 +909,13 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 	locked = {row["boq_item"]: frappe.get_doc("BOQ Item", row["boq_item"], for_update=True) for row in changes}
 	stored = _line_outcome(doc, request_id)
 	if stored:
-		if stored["fingerprint"] != fingerprint:
+		for change in changes:
+			item = locked[change["boq_item"]]
+			if item.boq != doc.name:
+				_line_values_refuse("BOQ_LINE_NOT_IN_BOQ")
+			if not _line_can_write(item, change):
+				_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
+		if stored["fingerprint"] != fingerprint or fingerprint.split(".")[-1] != _line_hash(_line_canonical(changes)):
 			_line_values_refuse("BOQ_LINES_STALE")
 		return stored
 	result = _line_preview(doc, changes, locked)
@@ -915,11 +946,17 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 			saved = frappe.get_doc("BOQ Item", line["boq_item"], for_update=True)
 			if _line_values(saved) != line["after"]:
 				_line_values_refuse("BOQ_LINE_SAVED_VALUES_MISMATCH")
+		saved_boq = frappe.get_doc("BOQ", doc.name, for_update=True)
+		if any(str(_line_round(_line_decimal(saved_boq.get(field) or 0), saved_boq, field)) != value
+			for field, value in result["totals"]["after"].items()):
+			_line_values_refuse("BOQ_LINE_SAVED_VALUES_MISMATCH")
 		result.update(status="COMMITTED", request_id=request_id, line_count=len(changes),
 			actor=frappe.session.user, edit_other_draft=cint(edit_other_draft))
-		doc.add_comment("Comment", "<pre>" + html.escape(json.dumps({
+		payload = {
 			"contract": "BOQLineValues.v1", "request_id": request_id, "outcome": result,
-		}, sort_keys=True)) + "</pre>")
+		}
+		payload["signature"] = _line_outcome_signature(payload)
+		doc.add_comment("Comment", "<pre>" + html.escape(json.dumps(payload, sort_keys=True)) + "</pre>")
 		return result
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
