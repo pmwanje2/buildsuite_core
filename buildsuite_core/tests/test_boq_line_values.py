@@ -6,11 +6,14 @@ Native Version creation still requires the disposable-bench receipt.
 """
 
 import copy
+import hashlib
+import hmac
 import json
+import sys
 import unittest
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from buildsuite_core.tests._boq_stub import AssignmentFlags, ensure_frappe_stub
@@ -163,6 +166,9 @@ class LineStore:
 		row = self.rows["BOQ", name]
 		planned = sum(Decimal(v["planned_amount"]) for (dt, _), v in self.rows.items() if dt == "BOQ Item" and v["boq"] == name)
 		row["planned_amount"] = str(planned)
+		margin = planned * Decimal(row["margin_rate"]) / 100
+		tax = (planned + margin) * Decimal(row["tax_rate"]) / 100
+		row.update(margin_amount=str(margin), tax_amount=str(tax), total=str(planned + margin + tax))
 		row["modified"] = "2026-10-28 12:01:00"
 
 
@@ -172,6 +178,12 @@ class TestBOQLineValues(unittest.TestCase):
 		self.addCleanup(patch.stopall)
 		patch.object(api, "frappe", self.store).start()
 		patch.object(api, "recompute_boq", self.store.recompute).start()
+		# Native signing is a framework boundary; this site-local key is test data.
+		signer = ModuleType("frappe.utils.verified_command")
+		signer.get_signed_params = lambda params: params + "&_signature=" + hmac.new(
+			b"disposable-test-key", params.encode(), hashlib.sha512
+		).hexdigest()
+		patch.dict(sys.modules, {"frappe.utils.verified_command": signer}).start()
 
 	def call(self, method, *args, **kwargs):
 		function = getattr(api, method, None)
@@ -363,6 +375,43 @@ class TestBOQLineValues(unittest.TestCase):
 		meta = json.loads((Path(__file__).resolve().parents[1] / "buildsuite_core/doctype/boq_item/boq_item.json").read_text())
 		self.assertEqual(meta.get("track_changes"), 1, "Native line Version history is not enabled")
 		self.assertGreater(meta["modified"], "2026-10-17 12:00:00.000000", "migrate must import the metadata change")
+
+	def test_replay_rechecks_line_permissions_and_binds_canonical_changes(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		self.commit(changes, preview)
+		self.store.denied.add(("BOQ Item", "A", "write"))
+		with self.assertRaises(PermissionError):
+			self.commit(changes, preview)
+		self.store.denied.clear()
+		with self.assertRaisesRegex(ValueError, "BOQ_LINES_STALE"):
+			self.commit([{"boq_item": "A", "rate": "999"}], preview)
+
+	def test_unsigned_or_edited_comment_is_not_commit_evidence(self):
+		preview = self.preview()
+		self.store.comments.append({
+			"comment_type": "Comment", "reference_doctype": "BOQ", "reference_name": "B",
+			"content": json.dumps({"contract": "BOQLineValues.v1", "request_id": "req-1",
+				"outcome": {"status": "COMMITTED", "boq": "B", "fingerprint": preview["fingerprint"]}}),
+		})
+		self.assertEqual(self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "NOT_APPLIED_SAFE_RETRY")
+		self.store.comments.clear()
+		changes = [{"boq_item": "A", "rate": "12"}]
+		self.commit(changes, preview)
+		self.store.comments[0]["content"] = self.store.comments[0]["content"].replace("12.00", "999.00")
+		self.assertNotEqual(self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "COMMITTED")
+
+	def test_saved_boq_totals_mismatch_rolls_back_the_batch(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		before = copy.deepcopy(self.store.rows)
+		def wrong_rollup(name):
+			self.store.recompute(name)
+			self.store.rows["BOQ", name]["planned_amount"] = "999.00"
+		with patch.object(api, "recompute_boq", wrong_rollup):
+			with self.assertRaisesRegex(ValueError, "BOQ_LINE_SAVED_VALUES_MISMATCH"):
+				self.commit(changes, preview)
+		self.unchanged(before)
 
 
 if __name__ == "__main__":
