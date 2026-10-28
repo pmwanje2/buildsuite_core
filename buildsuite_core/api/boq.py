@@ -1108,6 +1108,10 @@ def get_line_values_outcome(boq, request_id, fingerprint=None):
 	doc = frappe.get_doc("BOQ", boq)
 	if not frappe.has_permission("BOQ", "read", doc=doc):
 		_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
+	if not frappe.flags.get("read_only"):
+		# A normal recovery read must not silently reuse a pre-commit snapshot.
+		# Maintenance reads cannot lock; they use their read-only snapshot.
+		doc = frappe.get_doc("BOQ", boq, for_update=True)
 	stored = _line_outcome(doc, request_id)
 	if stored:
 		return stored
