@@ -6,7 +6,11 @@ Assembly explosion, revisions, clone, template import and actuals recompute.
 Reads go through the standard data adapter; only these mutations need the API.
 """
 
-from decimal import ROUND_HALF_UP, Decimal
+import hashlib
+import html
+import json
+import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 import frappe
 from frappe import _
@@ -632,3 +636,309 @@ def assign_work_packages(boq: str, assignments, test_run: int | bool = 1):
 		"ok": ok_count,
 		"skipped": len(lines) - ok_count,
 	}
+
+
+# --- atomic line values (Gap #6154, WP-17 Slice 1) --------------------------
+
+
+def _line_values_refuse(reason, permission=False):
+	frappe.throw(reason, frappe.PermissionError if permission else frappe.ValidationError)
+
+
+def _line_request_id(request_id, required=True):
+	if request_id is None and not required:
+		return None
+	if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", request_id):
+		_line_values_refuse("BOQ_LINES_INVALID")
+	return request_id
+
+
+def _line_changes(changes):
+	if isinstance(changes, str):
+		changes = frappe.parse_json(changes)
+	if not isinstance(changes, list) or not changes:
+		_line_values_refuse("BOQ_LINES_INVALID")
+	if len(changes) > 1000:
+		_line_values_refuse("BOQ_LINES_TOO_MANY")
+	shapes = ({"boq_item", "rate"}, {"boq_item", "planned_qty"},
+		{"boq_item", "rate_change_percent"}, {"boq_item", "rate", "assembly"})
+	seen = set()
+	for change in changes:
+		if not isinstance(change, dict) or set(change) not in shapes:
+			_line_values_refuse("BOQ_LINES_INVALID")
+		name = change["boq_item"]
+		if not isinstance(name, str) or not name or name in seen:
+			_line_values_refuse("BOQ_LINES_INVALID")
+		if "assembly" in change and (not isinstance(change["assembly"], str) or not change["assembly"]):
+			_line_values_refuse("BOQ_LINES_INVALID")
+		seen.add(name)
+	return sorted(changes, key=lambda row: row["boq_item"])
+
+
+def _line_decimal(value):
+	try:
+		if isinstance(value, bool) or value is None:
+			raise InvalidOperation
+		number = Decimal(str(value))
+		# Frappe's numeric columns are decimal(21,9); refuse unrepresentable input.
+		if not number.is_finite() or abs(number) >= Decimal("1e12"):
+			raise InvalidOperation
+		return number
+	except (InvalidOperation, ValueError, TypeError):
+		_line_values_refuse("BOQ_LINE_VALUE_INVALID")
+
+
+def _line_round(value, doc, field):
+	precision = doc.precision(field)
+	if precision is None:
+		_line_values_refuse("BOQ_LINE_PRECISION_UNAVAILABLE")
+	return value.quantize(Decimal(1).scaleb(-precision), rounding=ROUND_HALF_UP)
+
+
+def _line_values(item):
+	return {**{
+		field: str(_line_round(_line_decimal(item.get(field) or 0), item, field))
+		for field in ("rate", "planned_qty", "planned_amount")
+	}, "assembly": item.get("assembly") or None}
+
+
+def _line_current_revision(doc):
+	if doc.status != "Draft" or doc.get("docstatus", 0) != 0:
+		_line_values_refuse("BOQ_NOT_CURRENT_REVISION")
+	# The first tender Draft may have no base. Once an Approved revision exists,
+	# an unscoped Draft is not an eligible replacement for it.
+	others = frappe.get_all("BOQ", filters={"project": doc.project},
+		fields=["name", "status", "base_revision", "company"])
+	if any(row.name != doc.name and row.status in ("Draft", "Submitted") for row in others):
+		_line_values_refuse("BOQ_NOT_CURRENT_REVISION")
+	approved = [row for row in others if row.status == "Approved"]
+	if doc.base_revision:
+		if len(approved) != 1 or approved[0].name != doc.base_revision or approved[0].company != doc.company:
+			_line_values_refuse("BOQ_NOT_CURRENT_REVISION")
+	elif approved:
+		_line_values_refuse("BOQ_NOT_CURRENT_REVISION")
+
+
+def _line_state(doc, items):
+	currency = frappe.db.get_value("Company", doc.company, "default_currency")
+	if not currency:
+		_line_values_refuse("BOQ_LINE_CURRENCY_UNAVAILABLE")
+	state = {
+		"boq": {key: doc.get(key) for key in (
+			"name", "status", "docstatus", "revision", "base_revision", "owner", "modified",
+			"company", "project", "margin_rate", "tax_rate")},
+		"currency": currency,
+		"precision": {key: doc.precision(key) for key in ("planned_amount", "margin_amount", "tax_amount", "total")},
+		"items": [],
+	}
+	for item in items:
+		state["items"].append({
+			**{key: item.get(key) for key in ("name", "modified", "rate", "planned_qty", "planned_amount", "assembly", "boq_group")},
+			"precision": {key: item.precision(key) for key in ("rate", "planned_qty", "planned_amount")},
+			"sub_items": frappe.db.count("BOQ Sub Item", {"boq_item": item.name}),
+		})
+	return state
+
+
+def _line_hash(value):
+	return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _line_items(doc, locked=None):
+	# Read all lines, not a permission-filtered subset: partial totals are unsafe.
+	# Explicit BOQ and line permission checks precede disclosure to the caller.
+	locked = locked or {}
+	names = frappe.get_all("BOQ Item", filters={"boq": doc.name}, pluck="name")
+	items = [locked.get(name) or frappe.get_doc("BOQ Item", name) for name in sorted(names)]
+	for item in items:
+		if not frappe.has_permission("BOQ Item", "read", doc=item):
+			_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
+	return items
+
+
+def _line_totals(doc, planned):
+	margin = planned * _line_decimal(doc.margin_rate or 0) / Decimal(100)
+	tax = (planned + margin) * _line_decimal(doc.tax_rate or 0) / Decimal(100)
+	return {key: str(_line_round(value, doc, key)) for key, value in {
+		"planned_amount": planned, "margin_amount": margin, "tax_amount": tax,
+		"total": planned + margin + tax,
+	}.items()}
+
+
+def _line_preview(doc, changes, locked=None):
+	_line_current_revision(doc)
+	_require_write(doc)
+	items = _line_items(doc, locked)
+	by_name = {item.name: item for item in items}
+	state = _line_state(doc, items)
+	canonical = []
+	for row in changes:
+		canonical_row = {}
+		for key, value in row.items():
+			try:
+				canonical_row[key] = str(_line_decimal(value).normalize()) if key not in ("boq_item", "assembly") else value
+			except frappe.ValidationError:
+				canonical_row[key] = str(value)
+		canonical.append(canonical_row)
+	result = {
+		"boq": doc.name, "currency": state["currency"], "owner": doc.owner,
+		"owner_ack_required": doc.owner != frappe.session.user,
+		# Two hashes let outcome recovery compare the snapshot without storing previews.
+		"fingerprint": _line_hash(state) + "." + _line_hash(canonical),
+		"lines": [], "groups": [],
+	}
+	after_amounts = {item.name: _line_decimal(item.planned_amount or 0) for item in items}
+	for change in changes:
+		item = by_name.get(change["boq_item"])
+		if not item or item.boq != doc.name:
+			_line_values_refuse("BOQ_LINE_NOT_IN_BOQ")
+		before = _line_values(item)
+		after = dict(before)
+		reason = None
+		fields = [key for key in change if key not in ("boq_item", "rate_change_percent")]
+		if "rate_change_percent" in change:
+			fields.append("rate")
+		if not frappe.has_permission("BOQ Item", "write", doc=item) or any(
+			not item.has_permlevel_access_to(field, permission_type="write") for field in fields
+		):
+			reason = "BOQ_LINE_FIELD_NOT_PERMITTED"
+		elif "rate" in fields and "assembly" not in change and (
+			item.assembly or frappe.db.count("BOQ Sub Item", {"boq_item": item.name})
+		):
+			reason = "BOQ_LINE_RATE_FROM_BUILDUP"
+		else:
+			try:
+				for field in fields:
+					if field == "assembly":
+						after[field] = change[field]
+						continue
+					if "rate_change_percent" in change:
+						value = _line_decimal(item.rate or 0) * (Decimal(1) + _line_decimal(change["rate_change_percent"]) / Decimal(100))
+					else:
+						value = _line_decimal(change[field])
+					rounded = _line_round(value, item, field)
+					if value < 0 or abs(value) >= Decimal("1e12"):
+						_line_values_refuse("BOQ_LINE_VALUE_INVALID")
+					if "rate_change_percent" not in change and value != rounded:
+						_line_values_refuse("BOQ_LINE_PRECISION_EXCEEDED")
+					after[field] = str(rounded)
+				after["planned_amount"] = str(_line_round(
+					_line_decimal(after["rate"]) * _line_decimal(after["planned_qty"]), item, "planned_amount"))
+			except frappe.ValidationError as exc:
+				reason = str(exc)
+		if reason:
+			after = dict(before)
+		after_amounts[item.name] = _line_decimal(after["planned_amount"])
+		result["lines"].append({
+			"boq_item": item.name, "code": item.code, "description": item.description,
+			"precision": {field: item.precision(field) for field in ("rate", "planned_qty", "planned_amount")},
+			"before": before, "after": after,
+			"delta": str(_line_round(_line_decimal(after["planned_amount"]) - _line_decimal(before["planned_amount"]), item, "planned_amount")),
+			"status": "REFUSED" if reason else "OK", "reason": reason,
+		})
+	for group in sorted({item.boq_group for item in items}):
+		before = sum((_line_decimal(item.planned_amount or 0) for item in items if item.boq_group == group), Decimal(0))
+		after = sum((after_amounts[item.name] for item in items if item.boq_group == group), Decimal(0))
+		result["groups"].append({"boq_group": group, "before": str(_line_round(before, doc, "planned_amount")),
+			"after": str(_line_round(after, doc, "planned_amount")), "delta": str(_line_round(after - before, doc, "planned_amount"))})
+	before = _line_totals(doc, sum((_line_decimal(item.planned_amount or 0) for item in items), Decimal(0)))
+	after = _line_totals(doc, sum(after_amounts.values(), Decimal(0)))
+	result["totals"] = {"before": before, "after": after,
+		"delta": str(_line_decimal(after["total"]) - _line_decimal(before["total"]))}
+	return result
+
+
+def _line_outcome(doc, request_id):
+	for comment in frappe.get_all("Comment", filters={"reference_doctype": "BOQ",
+		"reference_name": doc.name, "comment_type": "Comment", "content": ("like", "%BOQLineValues.v1%")},
+		fields=["content"]):
+		try:
+			payload = json.loads(html.unescape(re.sub(r"<[^>]*>", "", comment.content)))
+		except (ValueError, TypeError):
+			continue
+		if payload.get("contract") == "BOQLineValues.v1" and payload.get("request_id") == request_id:
+			return payload["outcome"]
+	return None
+
+
+@frappe.whitelist()
+def preview_update_line_values(boq, changes, request_id=None):
+	"""Read-only, decimal-valued simulation; never saves even temporarily."""
+	_line_request_id(request_id, required=False)
+	changes = _line_changes(changes)
+	doc = frappe.get_doc("BOQ", boq)
+	return _line_preview(doc, changes)
+
+
+@frappe.whitelist()
+def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_other_draft=0):
+	"""All-or-nothing native saves. Caller/worker owns the outer transaction."""
+	_line_request_id(request_id)
+	changes = _line_changes(changes)
+	if test_run not in (0, 1, "0", "1") or edit_other_draft not in (0, 1, "0", "1"):
+		_line_values_refuse("BOQ_LINES_INVALID")
+	if cint(test_run):
+		return preview_update_line_values(boq, changes, request_id)
+	doc = frappe.get_doc("BOQ", boq, for_update=True)
+	_require_write(doc)
+	locked = {row["boq_item"]: frappe.get_doc("BOQ Item", row["boq_item"], for_update=True) for row in changes}
+	stored = _line_outcome(doc, request_id)
+	if stored:
+		if stored["fingerprint"] != fingerprint:
+			_line_values_refuse("BOQ_LINES_STALE")
+		return stored
+	result = _line_preview(doc, changes, locked)
+	if result["owner_ack_required"] and not cint(edit_other_draft):
+		_line_values_refuse("BOQ_DRAFT_OWNER_ACK_REQUIRED")
+	for line in result["lines"]:
+		if line["reason"]:
+			_line_values_refuse(line["reason"], permission=line["reason"] == "BOQ_LINE_FIELD_NOT_PERMITTED")
+	if not fingerprint or fingerprint != result["fingerprint"]:
+		_line_values_refuse("BOQ_LINES_STALE")
+	prior_skip = frappe.flags.get("boq_skip_rollup")
+	if prior_skip:
+		_line_values_refuse("BOQ_LINES_ROLLUP_SUSPENDED")
+	savepoint = "boq_line_values"
+	frappe.db.savepoint(savepoint)
+	try:
+		frappe.flags.boq_skip_rollup = True
+		for line in result["lines"]:
+			if line["before"] == line["after"]:
+				continue
+			item = locked[line["boq_item"]]
+			for field in ("rate", "planned_qty", "assembly"):
+				setattr(item, field, line["after"][field])
+			item.save()
+		frappe.flags.boq_skip_rollup = prior_skip
+		recompute_boq(doc.name)
+		for line in result["lines"]:
+			saved = frappe.get_doc("BOQ Item", line["boq_item"], for_update=True)
+			if _line_values(saved) != line["after"]:
+				_line_values_refuse("BOQ_LINE_SAVED_VALUES_MISMATCH")
+		result.update(status="COMMITTED", request_id=request_id, line_count=len(changes),
+			actor=frappe.session.user, edit_other_draft=cint(edit_other_draft))
+		doc.add_comment("Comment", "<pre>" + html.escape(json.dumps({
+			"contract": "BOQLineValues.v1", "request_id": request_id, "outcome": result,
+		}, sort_keys=True)) + "</pre>")
+		return result
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		raise
+	finally:
+		frappe.flags.boq_skip_rollup = prior_skip
+
+
+@frappe.whitelist()
+def get_line_values_outcome(boq, request_id, fingerprint=None):
+	"""Only the transactional BOQ Comment proves commit, never an RQ state."""
+	_line_request_id(request_id)
+	doc = frappe.get_doc("BOQ", boq, for_update=True)
+	if not frappe.has_permission("BOQ", "read", doc=doc):
+		_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
+	stored = _line_outcome(doc, request_id)
+	if stored:
+		return stored
+	state_hash = _line_hash(_line_state(doc, _line_items(doc)))
+	safe = isinstance(fingerprint, str) and fingerprint.split(".")[0] == state_hash
+	return {"boq": boq, "request_id": request_id,
+		"status": "NOT_APPLIED_SAFE_RETRY" if safe else "STALE_REPREVIEW"}
