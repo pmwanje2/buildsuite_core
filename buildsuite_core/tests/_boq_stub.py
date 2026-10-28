@@ -46,9 +46,10 @@ def ensure_frappe_stub():
 		frappe.ValidationError = ValueError
 		frappe.throw = _throw
 
-		def _whitelist():
+		def _whitelist(methods=None):
 			def _mark(function):
 				function._whitelisted = True
+				function._http_methods = methods or ["GET", "POST", "PUT", "DELETE"]
 				return function
 
 			return _mark

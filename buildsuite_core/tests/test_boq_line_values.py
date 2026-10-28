@@ -525,6 +525,14 @@ class TestBOQLineValues(unittest.TestCase):
 		self.commit(changes, preview)
 		self.assertEqual(self.store.rows["BOQ Item", "A"]["rate"], "10.005")
 
+	def test_commit_is_only_exposed_over_post_not_a_rolled_back_get(self):
+		# Frappe rolls GET requests back: returning COMMITTED over GET is false.
+		methods = getattr(api.update_line_values, "_http_methods", None)
+		if methods is None:
+			import frappe
+			methods = frappe.allowed_http_methods_for_whitelisted_func[api.update_line_values]
+		self.assertEqual(methods, ["POST"])
+
 
 if __name__ == "__main__":
 	unittest.main()
