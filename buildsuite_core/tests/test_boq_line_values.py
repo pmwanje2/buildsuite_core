@@ -485,7 +485,7 @@ class TestBOQLineValues(unittest.TestCase):
 		self.store.comments.clear()
 		changes = [{"boq_item": "A", "rate": "12"}]
 		self.commit(changes, preview)
-		self.store.comments[0]["content"] = self.store.comments[0]["content"].replace("12.00", "999.00")
+		self.store.comments[0]["content"] = self.store.comments[0]["content"].replace("45.05", "999.00")
 		self.assertNotEqual(
 			self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "COMMITTED"
 		)
