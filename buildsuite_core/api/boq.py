@@ -689,7 +689,7 @@ def _line_decimal(value):
 		if not number.is_finite() or abs(number) >= Decimal("1e12"):
 			raise InvalidOperation
 		return number
-	except InvalidOperation, ValueError, TypeError:
+	except (InvalidOperation, ValueError, TypeError) as _exc:
 		_line_values_refuse("BOQ_LINE_VALUE_INVALID")
 
 
@@ -986,7 +986,7 @@ def _line_outcome(doc, request_id):
 				signature, _line_outcome_signature(payload)
 			):
 				continue
-		except ValueError, TypeError:
+		except (ValueError, TypeError) as _exc:
 			continue
 		if (
 			payload.get("contract") == "BOQLineValues.v1"
