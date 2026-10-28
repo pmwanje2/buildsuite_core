@@ -823,7 +823,18 @@ def _line_items(doc, locked=None):
 	names = frappe.get_all("BOQ Item", filters={"boq": doc.name}, pluck="name")
 	items = [locked.get(name) or frappe.get_doc("BOQ Item", name) for name in sorted(names)]
 	for item in items:
-		if not frappe.has_permission("BOQ Item", "read", doc=item):
+		if not frappe.has_permission("BOQ Item", "read", doc=item) or any(
+			not item.has_permlevel_access_to(field, permission_type="read")
+			for field in (
+				"rate",
+				"planned_qty",
+				"planned_amount",
+				"assembly",
+				"code",
+				"description",
+				"boq_group",
+			)
+		):
 			_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
 	return items
 
@@ -1057,6 +1068,10 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 			actor=frappe.session.user,
 			edit_other_draft=cint(edit_other_draft),
 		)
+		# BOQ timeline readers need not have access to every line/permlevel.
+		# Store only the designed outcome summary, never per-line field values.
+		result.pop("lines")
+		result.pop("groups")
 		payload = {
 			"contract": "BOQLineValues.v1",
 			"request_id": request_id,
