@@ -23,6 +23,7 @@ class NativeQueueBoundary:
 		self.pending = []
 		self.jobs = {}
 		self.reads = []
+		self.current_job = None
 		store.local = SimpleNamespace(site="one.example.test")
 
 	def key(self, job_id):
@@ -64,6 +65,7 @@ class NativeQueueBoundary:
 			method=method,
 			kwargs=copy.deepcopy(kwargs),
 			user=self.store.session.user,
+			enqueuer=self.store.session.user,
 			site=self.store.local.site,
 			status="queued",
 		)
@@ -87,6 +89,7 @@ class NativeQueueBoundary:
 		old_user, old_site = self.store.session.user, self.store.local.site
 		self.store.session.user, self.store.local.site = job["user"], job["site"]
 		job["status"] = "started"
+		self.current_job = SimpleNamespace(kwargs={"user": job["enqueuer"], "site": job["site"]})
 		try:
 			method = job["method"]
 			if isinstance(method, str):
@@ -98,6 +101,7 @@ class NativeQueueBoundary:
 			job["status"] = "failed"
 			raise
 		finally:
+			self.current_job = None
 			self.store.session.user, self.store.local.site = old_user, old_site
 
 
@@ -113,6 +117,9 @@ class TestBOQLineJobs(unittest.TestCase):
 		background = ModuleType("frappe.utils.background_jobs")
 		background.get_job_status = self.queue.get_job_status
 		patch.dict(sys.modules, {"frappe.utils.background_jobs": background}).start()
+		rq = ModuleType("rq")
+		rq.get_current_job = lambda: self.queue.current_job
+		patch.dict(sys.modules, {"rq": rq}).start()
 		self.changes = [{"boq_item": "Z", "planned_qty": "4"}, {"boq_item": "A", "rate": "12"}]
 		self.fingerprint = self.preview(self.changes)["fingerprint"]
 
@@ -181,6 +188,39 @@ class TestBOQLineJobs(unittest.TestCase):
 		self.assertEqual(self.store.rows["BOQ Item", "Z"]["planned_qty"], "4.000")
 		self.assertEqual(len(self.store.comments), 1)
 		self.assertEqual(api.get_line_values_outcome("B", "req-1")["actor"], "qs@example.test")
+
+	def test_native_retry_identity_loss_fails_closed_without_privileged_writes(self):
+		job = self.enqueue(edit_other_draft=1)
+		self.queue.commit()
+		native = self.queue.jobs[self.queue.key(job["job_id"])]
+		native["user"] = "Administrator"  # pinned Frappe recursive retry loses user
+		before = copy.deepcopy(self.store.rows)
+		with self.assertRaisesRegex(PermissionError, "BOQ_LINES_JOB_IDENTITY_MISMATCH"):
+			self.queue.run(job["job_id"])
+		self.unchanged(before)
+
+	def test_worker_refuses_absent_or_cross_site_native_job_context(self):
+		job = self.enqueue()
+		self.queue.commit()
+		for context in (
+			None,
+			SimpleNamespace(kwargs={"user": "qs@example.test", "site": "foreign.example.test"}),
+		):
+			with (
+				self.subTest(context=context),
+				patch.object(sys.modules["rq"], "get_current_job", return_value=context),
+			):
+				with self.assertRaisesRegex(PermissionError, "BOQ_LINES_JOB_IDENTITY_MISMATCH"):
+					self.queue.run(job["job_id"])
+		self.assertEqual(self.store.versions, [])
+
+	def test_worker_result_never_persists_preview_financials_in_rq(self):
+		job = self.enqueue()
+		self.queue.commit()
+		result = self.queue.run(job["job_id"])
+		self.assertEqual(result["status"], "COMMITTED")
+		self.assertEqual(result["line_count"], 2)
+		self.assertTrue({"totals", "lines", "groups", "currency"}.isdisjoint(result))
 
 	def test_no_caller_identity_or_execution_mode_override(self):
 		self.call("enqueue_update_line_values", "B", self.changes, self.fingerprint, "req-1")
