@@ -31,8 +31,9 @@ class LineDoc(SimpleNamespace):
 		return self._store.precisions.get(fieldname, 2)
 
 	def has_permlevel_access_to(self, fieldname, df=None, permission_type="read"):
-		assert permission_type == "write"
-		return (self.name, fieldname) not in self._store.denied_fields
+		assert permission_type in ("write", "read")
+		denied = self._store.denied_fields if permission_type == "write" else self._store.denied_read_fields
+		return (self.name, fieldname) not in denied
 
 	def save(self, **kwargs):
 		assert not kwargs, "native save must retain permission and Version machinery"
@@ -75,6 +76,7 @@ class LineStore:
 		self.versions = []
 		self.denied = set()
 		self.denied_fields = set()
+		self.denied_read_fields = set()
 		self.precisions = {"planned_qty": 3}
 		self.flags = AssignmentFlags()
 		self.session = SimpleNamespace(user="qs@example.test")
@@ -501,6 +503,18 @@ class TestBOQLineValues(unittest.TestCase):
 			with self.assertRaisesRegex(ValueError, "BOQ_LINE_SAVED_VALUES_MISMATCH"):
 				self.commit(changes, preview)
 		self.unchanged(before)
+
+	def test_preview_does_not_disclose_a_read_restricted_line_field(self):
+		self.store.denied_read_fields.add(("Z", "rate"))
+		with self.assertRaisesRegex(PermissionError, "BOQ_LINE_FIELD_NOT_PERMITTED"):
+			self.preview()
+
+	def test_durable_comment_keeps_summary_not_restricted_line_values(self):
+		result = self.commit([{"boq_item": "A", "rate": "12"}])
+		self.assertNotIn("lines", result)
+		self.assertNotIn("groups", result)
+		self.assertIn("totals", result)
+		self.assertNotIn("Concrete", self.store.comments[0]["content"])
 
 
 if __name__ == "__main__":
