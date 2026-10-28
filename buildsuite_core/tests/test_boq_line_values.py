@@ -53,10 +53,15 @@ class LineDoc(SimpleNamespace):
 
 	def add_comment(self, comment_type, text=None):
 		assert comment_type == "Comment"
-		self._store.comments.append({
-			"name": f"COMMENT-{len(self._store.comments)}", "comment_type": comment_type,
-			"reference_doctype": "BOQ", "reference_name": self.name, "content": text,
-		})
+		self._store.comments.append(
+			{
+				"name": f"COMMENT-{len(self._store.comments)}",
+				"comment_type": comment_type,
+				"reference_doctype": "BOQ",
+				"reference_name": self.name,
+				"content": text,
+			}
+		)
 		if self._store.fail_comment:
 			raise ValueError("comment failed")
 		return SimpleNamespace(name=self._store.comments[-1]["name"])
@@ -80,24 +85,46 @@ class LineStore:
 		self.fail_comment = False
 		self.on_lock = None
 		self.db = SimpleNamespace(
-			savepoint=self.savepoint, rollback=self.rollback, get_value=self.get_value,
-			count=self.count, exists=lambda *args, **kwargs: True,
+			savepoint=self.savepoint,
+			rollback=self.rollback,
+			get_value=self.get_value,
+			count=self.count,
+			exists=lambda *args, **kwargs: True,
 		)
 		self.add("BOQ", "BASE", status="Approved", revision=1)
 		self.add("BOQ", "B", status="Draft", revision=2, base_revision="BASE")
-		self.add("BOQ Item", "A", boq="B", boq_group="G1", rate="10.00", planned_qty="2.000", planned_amount="20.00")
-		self.add("BOQ Item", "Z", boq="B", boq_group="G2", rate="5.00", planned_qty="3.000", planned_amount="15.00")
+		self.add(
+			"BOQ Item",
+			"A",
+			boq="B",
+			boq_group="G1",
+			rate="10.00",
+			planned_qty="2.000",
+			planned_amount="20.00",
+		)
+		self.add(
+			"BOQ Item", "Z", boq="B", boq_group="G2", rate="5.00", planned_qty="3.000", planned_amount="15.00"
+		)
 		self.add("Company", "CO", default_currency="USD")
 
 	def add(self, doctype, name, **values):
-		self.rows[doctype, name] = dict(
-			doctype=doctype, name=name, owner=self.session.user, modified="2026-10-28 12:00:00",
-			company="CO", project="P", docstatus=0, base_revision=None, assembly=None,
-			code=name, description="Concrete", margin_rate="10", tax_rate="5", **values,
-		) if not {"base_revision", "assembly"}.intersection(values) else {
-			**dict(doctype=doctype, name=name, owner=self.session.user, modified="2026-10-28 12:00:00",
-			company="CO", project="P", docstatus=0, base_revision=None, assembly=None,
-			code=name, description="Concrete", margin_rate="10", tax_rate="5"), **values,
+		self.rows[doctype, name] = {
+			**dict(
+				doctype=doctype,
+				name=name,
+				owner=self.session.user,
+				modified="2026-10-28 12:00:00",
+				company="CO",
+				project="P",
+				docstatus=0,
+				base_revision=None,
+				assembly=None,
+				code=name,
+				description="Concrete",
+				margin_rate="10",
+				tax_rate="5",
+			),
+			**values,
 		}
 
 	@staticmethod
@@ -124,7 +151,11 @@ class LineStore:
 		return LineDoc(_store=self, **copy.deepcopy(self.rows[doctype, name]))
 
 	def get_all(self, doctype, filters=None, fields=None, pluck=None, **kwargs):
-		rows = self.comments if doctype == "Comment" else [v for (dt, _), v in self.rows.items() if dt == doctype]
+		rows = (
+			self.comments
+			if doctype == "Comment"
+			else [v for (dt, _), v in self.rows.items() if dt == doctype]
+		)
 		rows = [row for row in rows if self.matches(row, filters)]
 		if pluck:
 			return [row.get(pluck) for row in rows]
@@ -164,7 +195,11 @@ class LineStore:
 		assert not self.flags.get("boq_skip_rollup")
 		self.events.append(("rollup", name))
 		row = self.rows["BOQ", name]
-		planned = sum(Decimal(v["planned_amount"]) for (dt, _), v in self.rows.items() if dt == "BOQ Item" and v["boq"] == name)
+		planned = sum(
+			Decimal(v["planned_amount"])
+			for (dt, _), v in self.rows.items()
+			if dt == "BOQ Item" and v["boq"] == name
+		)
 		row["planned_amount"] = str(planned)
 		margin = planned * Decimal(row["margin_rate"]) / 100
 		tax = (planned + margin) * Decimal(row["tax_rate"]) / 100
@@ -180,9 +215,11 @@ class TestBOQLineValues(unittest.TestCase):
 		patch.object(api, "recompute_boq", self.store.recompute).start()
 		# Native signing is a framework boundary; this site-local key is test data.
 		signer = ModuleType("frappe.utils.verified_command")
-		signer.get_signed_params = lambda params: params + "&_signature=" + hmac.new(
-			b"disposable-test-key", params.encode(), hashlib.sha512
-		).hexdigest()
+		signer.get_signed_params = lambda params: (
+			params
+			+ "&_signature="
+			+ hmac.new(b"disposable-test-key", params.encode(), hashlib.sha512).hexdigest()
+		)
 		patch.dict(sys.modules, {"frappe.utils.verified_command": signer}).start()
 
 	def call(self, method, *args, **kwargs):
@@ -191,11 +228,18 @@ class TestBOQLineValues(unittest.TestCase):
 		return function(*args, **kwargs)
 
 	def preview(self, changes=None, request_id="req-1"):
-		return self.call("preview_update_line_values", "B", changes or [{"boq_item": "A", "rate": "12.00"}], request_id=request_id)
+		return self.call(
+			"preview_update_line_values",
+			"B",
+			changes or [{"boq_item": "A", "rate": "12.00"}],
+			request_id=request_id,
+		)
 
 	def commit(self, changes, preview=None, **kwargs):
 		preview = preview or self.preview(changes)
-		return self.call("update_line_values", "B", changes, preview["fingerprint"], "req-1", test_run=0, **kwargs)
+		return self.call(
+			"update_line_values", "B", changes, preview["fingerprint"], "req-1", test_run=0, **kwargs
+		)
 
 	def unchanged(self, before):
 		self.assertEqual(self.store.rows, before)
@@ -206,16 +250,23 @@ class TestBOQLineValues(unittest.TestCase):
 		before = copy.deepcopy(self.store.rows)
 		result = self.preview()
 		self.assertEqual(result["currency"], "USD")
-		self.assertEqual(result["lines"][0]["before"], {"rate": "10.00", "planned_qty": "2.000", "planned_amount": "20.00", "assembly": None})
+		self.assertEqual(
+			result["lines"][0]["before"],
+			{"rate": "10.00", "planned_qty": "2.000", "planned_amount": "20.00", "assembly": None},
+		)
 		self.assertEqual(result["lines"][0]["after"]["planned_amount"], "24.00")
 		self.assertEqual(result["lines"][0]["delta"], "4.00")
-		self.assertEqual(result["groups"][0], {"boq_group": "G1", "before": "20.00", "after": "24.00", "delta": "4.00"})
+		self.assertEqual(
+			result["groups"][0], {"boq_group": "G1", "before": "20.00", "after": "24.00", "delta": "4.00"}
+		)
 		self.assertEqual(result["totals"]["before"]["total"], "40.43")
 		self.assertEqual(result["totals"]["after"]["total"], "45.05")
 		self.assertEqual(result["totals"]["delta"], "4.62")
 		self.unchanged(before)
 		self.assertFalse(any(e[0] in ("savepoint", "rollup", "save") for e in self.store.events))
-		self.call("update_line_values", "B", [{"boq_item": "A", "rate": "12"}], result["fingerprint"], "req-1")
+		self.call(
+			"update_line_values", "B", [{"boq_item": "A", "rate": "12"}], result["fingerprint"], "req-1"
+		)
 		self.unchanged(before)
 
 	def test_commit_refuses_entire_batch_on_one_bad_line(self):
@@ -316,23 +367,36 @@ class TestBOQLineValues(unittest.TestCase):
 		self.store.rows["BOQ Item", "A"].update(rate="1.00", planned_qty="2.000", planned_amount="2.00")
 		result = self.preview([{"boq_item": "A", "rate_change_percent": "0.5"}])
 		self.assertEqual(result["lines"][0]["after"]["rate"], "1.01")
-		for field, value in (("rate", "1.001"), ("planned_qty", "1.0001"), ("rate", "NaN"), ("rate", "Infinity"), ("rate", "-1")):
+		for field, value in (
+			("rate", "1.001"),
+			("planned_qty", "1.0001"),
+			("rate", "NaN"),
+			("rate", "Infinity"),
+			("rate", "-1"),
+		):
 			result = self.preview([{"boq_item": "A", field: value}])
 			self.assertEqual(result["lines"][0]["status"], "REFUSED")
 		self.store.precisions["rate"] = 0
-		self.assertEqual(self.preview([{"boq_item": "A", "rate_change_percent": "50"}])["lines"][0]["after"]["rate"], "2")
+		self.assertEqual(
+			self.preview([{"boq_item": "A", "rate_change_percent": "50"}])["lines"][0]["after"]["rate"], "2"
+		)
 
 	def test_stale_fingerprint_refused_under_lock(self):
 		changes = [{"boq_item": "Z", "rate": "6"}, {"boq_item": "A", "rate": "12"}]
 		preview = self.preview(changes)
 		self.store.events.clear()
+
 		def concurrent_edit(doctype, name):
 			if (doctype, name) == ("BOQ Item", "Z"):
 				self.store.rows[doctype, name]["modified"] = "2026-10-28 12:00:01"
+
 		self.store.on_lock = concurrent_edit
 		with self.assertRaisesRegex(ValueError, "BOQ_LINES_STALE"):
 			self.commit(changes, preview)
-		self.assertEqual([e for e in self.store.events if e[0] == "lock"][:3], [("lock", "BOQ", "B"), ("lock", "BOQ Item", "A"), ("lock", "BOQ Item", "Z")])
+		self.assertEqual(
+			[e for e in self.store.events if e[0] == "lock"][:3],
+			[("lock", "BOQ", "B"), ("lock", "BOQ Item", "A"), ("lock", "BOQ Item", "Z")],
+		)
 		self.assertFalse(any(e[0] == "save" for e in self.store.events))
 		self.store.on_lock = None
 		preview = self.preview(changes)
@@ -368,13 +432,22 @@ class TestBOQLineValues(unittest.TestCase):
 		outcome = self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])
 		self.assertEqual(outcome["status"], "NOT_APPLIED_SAFE_RETRY")
 		self.store.rows["BOQ Item", "A"]["modified"] = "2026-10-28 12:00:01"
-		self.assertEqual(self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "STALE_REPREVIEW")
+		self.assertEqual(
+			self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"],
+			"STALE_REPREVIEW",
+		)
 		self.assertEqual(self.call("get_line_values_outcome", "B", "req-1")["status"], "STALE_REPREVIEW")
 
 	def test_boq_item_track_changes_enabled(self):
-		meta = json.loads((Path(__file__).resolve().parents[1] / "buildsuite_core/doctype/boq_item/boq_item.json").read_text())
+		meta = json.loads(
+			(
+				Path(__file__).resolve().parents[1] / "buildsuite_core/doctype/boq_item/boq_item.json"
+			).read_text()
+		)
 		self.assertEqual(meta.get("track_changes"), 1, "Native line Version history is not enabled")
-		self.assertGreater(meta["modified"], "2026-10-17 12:00:00.000000", "migrate must import the metadata change")
+		self.assertGreater(
+			meta["modified"], "2026-10-17 12:00:00.000000", "migrate must import the metadata change"
+		)
 
 	def test_replay_rechecks_line_permissions_and_binds_canonical_changes(self):
 		changes = [{"boq_item": "A", "rate": "12"}]
@@ -389,25 +462,41 @@ class TestBOQLineValues(unittest.TestCase):
 
 	def test_unsigned_or_edited_comment_is_not_commit_evidence(self):
 		preview = self.preview()
-		self.store.comments.append({
-			"comment_type": "Comment", "reference_doctype": "BOQ", "reference_name": "B",
-			"content": json.dumps({"contract": "BOQLineValues.v1", "request_id": "req-1",
-				"outcome": {"status": "COMMITTED", "boq": "B", "fingerprint": preview["fingerprint"]}}),
-		})
-		self.assertEqual(self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "NOT_APPLIED_SAFE_RETRY")
+		self.store.comments.append(
+			{
+				"comment_type": "Comment",
+				"reference_doctype": "BOQ",
+				"reference_name": "B",
+				"content": json.dumps(
+					{
+						"contract": "BOQLineValues.v1",
+						"request_id": "req-1",
+						"outcome": {"status": "COMMITTED", "boq": "B", "fingerprint": preview["fingerprint"]},
+					}
+				),
+			}
+		)
+		self.assertEqual(
+			self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"],
+			"NOT_APPLIED_SAFE_RETRY",
+		)
 		self.store.comments.clear()
 		changes = [{"boq_item": "A", "rate": "12"}]
 		self.commit(changes, preview)
 		self.store.comments[0]["content"] = self.store.comments[0]["content"].replace("12.00", "999.00")
-		self.assertNotEqual(self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "COMMITTED")
+		self.assertNotEqual(
+			self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "COMMITTED"
+		)
 
 	def test_saved_boq_totals_mismatch_rolls_back_the_batch(self):
 		changes = [{"boq_item": "A", "rate": "12"}]
 		preview = self.preview(changes)
 		before = copy.deepcopy(self.store.rows)
+
 		def wrong_rollup(name):
 			self.store.recompute(name)
 			self.store.rows["BOQ", name]["planned_amount"] = "999.00"
+
 		with patch.object(api, "recompute_boq", wrong_rollup):
 			with self.assertRaisesRegex(ValueError, "BOQ_LINE_SAVED_VALUES_MISMATCH"):
 				self.commit(changes, preview)
