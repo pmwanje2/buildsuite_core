@@ -530,6 +530,7 @@ class TestBOQLineValues(unittest.TestCase):
 		methods = getattr(api.update_line_values, "_http_methods", None)
 		if methods is None:
 			import frappe
+
 			methods = frappe.allowed_http_methods_for_whitelisted_func[api.update_line_values]
 		self.assertEqual(methods, ["POST"])
 

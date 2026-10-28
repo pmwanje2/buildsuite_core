@@ -1003,7 +1003,7 @@ def preview_update_line_values(boq, changes, request_id=None):
 	return _line_preview(doc, changes)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_other_draft=0):
 	"""All-or-nothing native saves. Caller/worker owns the outer transaction."""
 	_line_request_id(request_id)
