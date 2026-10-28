@@ -966,6 +966,27 @@ def _line_preview(doc, changes, locked=None):
 	return result
 
 
+def _line_receipt(result):
+	# BOQ timeline access does not imply access to line financial permlevels.
+	# Use the same metadata-only projection for new writes and signed legacy reads.
+	return {
+		key: result[key]
+		for key in (
+			"status",
+			"boq",
+			"request_id",
+			"fingerprint",
+			"actor",
+			"line_count",
+			"edit_other_draft",
+			"currency",
+			"owner",
+			"owner_ack_required",
+		)
+		if key in result
+	}
+
+
 def _line_outcome(doc, request_id):
 	for comment in frappe.get_all(
 		"Comment",
@@ -993,7 +1014,7 @@ def _line_outcome(doc, request_id):
 			and payload.get("request_id") == request_id
 			and payload.get("outcome", {}).get("boq") == doc.name
 		):
-			return payload["outcome"]
+			return _line_receipt(payload["outcome"])
 	return None
 
 
@@ -1082,10 +1103,8 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 			actor=frappe.session.user,
 			edit_other_draft=cint(edit_other_draft),
 		)
-		# BOQ timeline readers need not have access to every line/permlevel.
-		# Store only the designed outcome summary, never per-line field values.
-		result.pop("lines")
-		result.pop("groups")
+		# Money remains in the authorized preview and native ERP documents only.
+		result = _line_receipt(result)
 		payload = {
 			"contract": "BOQLineValues.v1",
 			"request_id": request_id,
@@ -1105,6 +1124,8 @@ def update_line_values(boq, changes, fingerprint, request_id, test_run=1, edit_o
 def get_line_values_outcome(boq, request_id, fingerprint=None):
 	"""Only the transactional BOQ Comment proves commit, never an RQ state."""
 	_line_request_id(request_id)
+	if not frappe.session.user or frappe.session.user == "Guest":
+		_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
 	doc = frappe.get_doc("BOQ", boq)
 	if not frappe.has_permission("BOQ", "read", doc=doc):
 		_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
