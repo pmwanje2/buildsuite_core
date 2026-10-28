@@ -42,7 +42,12 @@ class LineDoc(SimpleNamespace):
 		if self.name == store.fail_save:
 			raise ValueError("native validation refused")
 		if self.doctype == "BOQ Item":
-			self.planned_amount = str(Decimal(str(self.rate)) * Decimal(str(self.planned_qty)))
+			# BOQItem.validate uses flt(qty) * flt(rate), then decimal(21,9) storage.
+			self.planned_amount = str(
+				Decimal(str(float(self.planned_qty) * float(self.rate))).quantize(
+					Decimal("1e-9"), rounding=ROUND_HALF_UP
+				)
+			)
 			if self.name == store.reset_save:
 				self.rate = "10.00"
 			store.versions.append(self.name)
@@ -91,7 +96,7 @@ class LineStore:
 			rollback=self.rollback,
 			get_value=self.get_value,
 			count=self.count,
-			exists=lambda *args, **kwargs: True,
+			exists=lambda doctype, name: (doctype, name) in self.rows,
 		)
 		self.add("BOQ", "BASE", status="Approved", revision=1)
 		self.add("BOQ", "B", status="Draft", revision=2, base_revision="BASE")
@@ -362,6 +367,11 @@ class TestBOQLineValues(unittest.TestCase):
 		changes = [{"boq_item": "A", "rate": "12", "assembly": "ASM"}]
 		self.store.add("Assembly", "ASM")
 		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["reason"], "BOQ_LINE_RATE_FROM_BUILDUP")
+		with self.assertRaisesRegex(ValueError, "BOQ_LINE_RATE_FROM_BUILDUP"):
+			self.commit(changes, preview)
+		del self.store.rows["BOQ Sub Item", "SUB"]
+		preview = self.preview(changes)
 		self.commit(changes, preview)
 		self.assertEqual(self.store.rows["BOQ Item", "A"]["assembly"], "ASM")
 
@@ -413,7 +423,7 @@ class TestBOQLineValues(unittest.TestCase):
 		self.assertEqual(self.store.versions, ["A", "Z"])
 		self.assertEqual([e for e in self.store.events if e[0] == "rollup"], [("rollup", "B")])
 		self.assertTrue(all(e[3] is True for e in self.store.events if e[0] == "save"))
-		self.assertEqual(self.store.rows["BOQ", "B"]["planned_amount"], "42.00000")
+		self.assertEqual(Decimal(self.store.rows["BOQ", "B"]["planned_amount"]), Decimal("42"))
 		self.assertEqual(len(self.store.comments), 1)
 
 	def test_same_request_id_returns_committed_outcome_without_second_write(self):
@@ -521,6 +531,8 @@ class TestBOQLineValues(unittest.TestCase):
 		self.store.rows["BOQ Item", "A"].update(rate="10.005", planned_amount="20.010")
 		changes = [{"boq_item": "A", "planned_qty": "3"}]
 		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["before"]["rate"], "10.005")
+		self.assertEqual(preview["lines"][0]["after"]["rate"], "10.005")
 		self.assertEqual(preview["lines"][0]["after"]["planned_amount"], "30.02")
 		self.commit(changes, preview)
 		self.assertEqual(self.store.rows["BOQ Item", "A"]["rate"], "10.005")
@@ -533,6 +545,129 @@ class TestBOQLineValues(unittest.TestCase):
 
 			methods = frappe.allowed_http_methods_for_whitelisted_func[api.update_line_values]
 		self.assertEqual(methods, ["POST"])
+
+	def test_assembly_must_exist_be_enabled_and_be_readable(self):
+		changes = [{"boq_item": "A", "rate": "12", "assembly": "ASM"}]
+		for state, reason in (
+			("missing", "BOQ_LINE_ASSEMBLY_NOT_FOUND"),
+			("disabled", "BOQ_LINE_ASSEMBLY_DISABLED"),
+			("unreadable", "BOQ_LINE_FIELD_NOT_PERMITTED"),
+		):
+			with self.subTest(state=state):
+				if state != "missing":
+					self.store.add("Assembly", "ASM", disabled=int(state == "disabled"))
+				if state == "unreadable":
+					self.store.denied.add(("Assembly", "ASM", "read"))
+				before = copy.deepcopy(self.store.rows)
+				preview = self.preview(changes)
+				self.assertEqual(preview["lines"][0]["reason"], reason)
+				with self.assertRaisesRegex(PermissionError if state == "unreadable" else ValueError, reason):
+					self.commit(changes, preview)
+				self.unchanged(before)
+
+	def test_assembly_apply_refuses_existing_assembly_without_sub_items(self):
+		self.store.add("Assembly", "ASM", disabled=0)
+		self.store.rows["BOQ Item", "A"]["assembly"] = "OLD"
+		changes = [{"boq_item": "A", "rate": "12", "assembly": "ASM"}]
+		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["reason"], "BOQ_LINE_RATE_FROM_BUILDUP")
+		with self.assertRaisesRegex(ValueError, "BOQ_LINE_RATE_FROM_BUILDUP"):
+			self.commit(changes, preview)
+
+	def test_native_float_half_cent_preview_matches_commit(self):
+		self.store.rows["BOQ Item", "A"].update(planned_qty="878.500", planned_amount="8785.000")
+		changes = [{"boq_item": "A", "rate": "8909.13"}]
+		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["after"]["planned_amount"], "7826670.70")
+		self.assertEqual(self.commit(changes, preview)["status"], "COMMITTED")
+		self.assertEqual(self.store.rows["BOQ Item", "A"]["planned_amount"], "7826670.704999999")
+
+	def test_write_permission_and_membership_refusals_take_no_locks(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		for denied, reason in (
+			(("BOQ", "B", "write"), "BOQ_WRITE_NOT_PERMITTED"),
+			(("BOQ Item", "A", "write"), "BOQ_LINE_FIELD_NOT_PERMITTED"),
+		):
+			with self.subTest(denied=denied):
+				self.store.denied = {denied}
+				self.store.events.clear()
+				with self.assertRaisesRegex(PermissionError, reason):
+					self.commit(changes, preview)
+				self.assertEqual(self.store.events, [])
+		self.store.denied.clear()
+
+	def test_field_permission_refusal_takes_no_locks(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		self.store.denied_fields.add(("A", "rate"))
+		with self.assertRaisesRegex(PermissionError, "BOQ_LINE_FIELD_NOT_PERMITTED"):
+			self.commit(changes, preview)
+		self.assertEqual(self.store.events, [])
+
+	def test_missing_or_foreign_line_refusal_takes_no_locks(self):
+		preview = self.preview()
+		for name in ("FOREIGN", "MISSING"):
+			with self.subTest(name=name):
+				self.store.add("BOQ Item", "FOREIGN", boq="OTHER")
+				self.store.events.clear()
+				with self.assertRaisesRegex(ValueError, "BOQ_LINE_NOT_IN_BOQ"):
+					self.commit([{"boq_item": name, "rate": "12"}], preview)
+				self.assertEqual(self.store.events, [])
+
+	def test_outcome_read_permission_and_maintenance_reads_take_no_locks(self):
+		self.preview()
+		self.store.denied.add(("BOQ", "B", "read"))
+		with self.assertRaises(PermissionError):
+			self.call("get_line_values_outcome", "B", "req-1")
+		self.assertEqual(self.store.events, [])
+
+	def test_maintenance_outcome_read_takes_no_locks(self):
+		preview = self.preview()
+
+		def read_only(doctype, name):
+			raise ValueError("InReadOnlyMode")
+
+		self.store.on_lock = read_only
+		self.assertEqual(
+			self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"],
+			"NOT_APPLIED_SAFE_RETRY",
+		)
+		self.assertEqual(self.store.events, [])
+
+	def test_rollup_suspended_refuses_without_mutation(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		before = copy.deepcopy(self.store.rows)
+		self.store.flags.boq_skip_rollup = True
+		with self.assertRaisesRegex(ValueError, "BOQ_LINES_ROLLUP_SUSPENDED"):
+			self.commit(changes, preview)
+		self.unchanged(before)
+		self.assertTrue(self.store.flags.boq_skip_rollup)
+
+	def test_missing_currency_and_precision_fail_closed(self):
+		self.store.rows["Company", "CO"]["default_currency"] = None
+		with self.assertRaisesRegex(ValueError, "BOQ_LINE_CURRENCY_UNAVAILABLE"):
+			self.preview()
+		self.store.rows["Company", "CO"]["default_currency"] = "USD"
+		self.store.precisions["rate"] = None
+		with self.assertRaisesRegex(ValueError, "BOQ_LINE_PRECISION_UNAVAILABLE"):
+			self.preview()
+		self.assertEqual(self.store.events, [])
+
+	def test_decimal_column_value_cap_refuses_direct_and_computed_values(self):
+		for field, value in (
+			("rate", "1000000000000"),
+			("planned_qty", "1e12"),
+			("rate_change_percent", "1e13"),
+		):
+			with self.subTest(field=field):
+				changes = [{"boq_item": "A", field: value}]
+				preview = self.preview(changes)
+				self.assertEqual(preview["lines"][0]["reason"], "BOQ_LINE_VALUE_INVALID")
+				with self.assertRaisesRegex(ValueError, "BOQ_LINE_VALUE_INVALID"):
+					self.commit(changes, preview)
+		self.assertEqual(self.store.versions, [])
 
 
 if __name__ == "__main__":
