@@ -8,6 +8,7 @@ Native Version creation still requires the disposable-bench receipt.
 import copy
 import hashlib
 import hmac
+import html
 import json
 import sys
 import unittest
@@ -253,6 +254,38 @@ class TestBOQLineValues(unittest.TestCase):
 		self.assertEqual(self.store.comments, [])
 		self.assertEqual(self.store.versions, [])
 
+	def receipt(self, fingerprint):
+		return {
+			"boq": "B",
+			"currency": "USD",
+			"owner": "qs@example.test",
+			"owner_ack_required": False,
+			"fingerprint": fingerprint,
+			"status": "COMMITTED",
+			"request_id": "req-1",
+			"line_count": 1,
+			"actor": "qs@example.test",
+			"edit_other_draft": 0,
+		}
+
+	def legacy_receipt(self, changes, preview):
+		# Historical v1 receipts were signed with totals; extra nested financial
+		# fields also exercise deny-by-default projection, not a totals blacklist.
+		self.commit(changes, preview)
+		payload = {
+			"contract": "BOQLineValues.v1",
+			"request_id": "req-1",
+			"outcome": {
+				**self.receipt(preview["fingerprint"]),
+				"totals": copy.deepcopy(preview["totals"]),
+				"lines": copy.deepcopy(preview["lines"]),
+				"groups": copy.deepcopy(preview["groups"]),
+				"historical_values": {"rate": "10.00", "delta": "4.62"},
+			},
+		}
+		payload["signature"] = api._line_outcome_signature(payload)
+		self.store.comments[0]["content"] = "<pre>" + html.escape(json.dumps(payload)) + "</pre>"
+
 	def test_preview_returns_precision_currency_deltas_totals_and_writes_nothing(self):
 		before = copy.deepcopy(self.store.rows)
 		result = self.preview()
@@ -495,7 +528,9 @@ class TestBOQLineValues(unittest.TestCase):
 		self.store.comments.clear()
 		changes = [{"boq_item": "A", "rate": "12"}]
 		self.commit(changes, preview)
-		self.store.comments[0]["content"] = self.store.comments[0]["content"].replace("45.05", "999.00")
+		self.store.comments[0]["content"] = self.store.comments[0]["content"].replace(
+			"qs@example.test", "forged@example.test"
+		)
 		self.assertNotEqual(
 			self.call("get_line_values_outcome", "B", "req-1", preview["fingerprint"])["status"], "COMMITTED"
 		)
@@ -520,11 +555,97 @@ class TestBOQLineValues(unittest.TestCase):
 			self.preview()
 
 	def test_durable_comment_keeps_summary_not_restricted_line_values(self):
-		result = self.commit([{"boq_item": "A", "rate": "12"}])
-		self.assertNotIn("lines", result)
-		self.assertNotIn("groups", result)
-		self.assertIn("totals", result)
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		result = self.commit(changes, preview)
+		payload = json.loads(html.unescape(self.store.comments[0]["content"][5:-6]))
+		signature = payload.pop("signature")
+		self.assertEqual(signature, api._line_outcome_signature(payload))
+		self.assertEqual(set(payload), {"contract", "request_id", "outcome"})
+		self.assertNotIn("totals", payload["outcome"])
+		self.assertEqual(payload["outcome"], self.receipt(preview["fingerprint"]))
+		self.assertEqual(result, self.receipt(preview["fingerprint"]))
+		self.assertRegex(result["fingerprint"], r"^[0-9a-f]{64}\.[0-9a-f]{64}$")
 		self.assertNotIn("Concrete", self.store.comments[0]["content"])
+
+	def test_restricted_boq_reader_gets_committed_metadata_without_financial_access(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		self.commit(changes, preview)
+		self.store.session.user = "reader@example.test"
+		self.store.denied.add(("BOQ", "B", "write"))
+		self.store.denied.add(("BOQ Item", "A", "read"))
+		self.store.denied_read_fields.update(
+			(name, field) for name in ("A", "Z") for field in ("rate", "planned_qty", "planned_amount")
+		)
+		self.assertEqual(
+			self.call("get_line_values_outcome", "B", "req-1"), self.receipt(preview["fingerprint"])
+		)
+		self.assertEqual(self.store.versions, ["A"])
+
+	def test_metadata_only_replay_keeps_one_native_write_and_one_comment(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		self.commit(changes, preview)
+		self.store.rows["BOQ", "B"]["status"] = "Approved"
+		self.assertEqual(self.commit(changes, preview), self.receipt(preview["fingerprint"]))
+		self.assertEqual(len(self.store.comments), 1)
+		self.assertEqual(self.store.versions, ["A"])
+		self.assertEqual(len([e for e in self.store.events if e[0] == "save"]), 1)
+		self.assertEqual(len([e for e in self.store.events if e[0] == "rollup"]), 1)
+
+	def test_legacy_signed_receipt_read_sanitizes_even_when_current_header_is_readable(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		self.legacy_receipt(changes, preview)
+		comments = copy.deepcopy(self.store.comments)
+		# Current header visibility never authorizes historical line amounts.
+		self.store.rows["BOQ", "B"]["total"] = "1234.00"
+		self.store.session.user = "reader@example.test"
+		self.store.denied_read_fields.add(("A", "planned_amount"))
+		self.assertEqual(
+			self.call("get_line_values_outcome", "B", "req-1"), self.receipt(preview["fingerprint"])
+		)
+		self.assertEqual(self.store.comments, comments, "Legacy Comments must not be rewritten")
+
+	def test_legacy_signed_receipt_replay_sanitizes_without_second_write(self):
+		changes = [{"boq_item": "A", "rate": "12"}]
+		preview = self.preview(changes)
+		self.legacy_receipt(changes, preview)
+		comments = copy.deepcopy(self.store.comments)
+		self.assertEqual(self.commit(changes, preview), self.receipt(preview["fingerprint"]))
+		self.assertEqual(self.store.comments, comments)
+		self.assertEqual(self.store.versions, ["A"])
+
+	def test_receipt_recovery_requires_authenticated_caller_even_with_boq_read(self):
+		self.commit([{"boq_item": "A", "rate": "12"}])
+		for user in ("Guest", "", None):
+			with self.subTest(user=user):
+				self.store.session.user = user
+				self.store.events.clear()
+				with self.assertRaisesRegex(PermissionError, "BOQ_LINE_FIELD_NOT_PERMITTED"):
+					self.call("get_line_values_outcome", "B", "req-1")
+				self.assertEqual(self.store.events, [])
+
+	def test_receipt_is_bound_to_site_boq_request_and_current_read_permission(self):
+		self.commit([{"boq_item": "A", "rate": "12"}])
+		self.assertEqual(self.call("get_line_values_outcome", "BASE", "req-1")["status"], "STALE_REPREVIEW")
+		self.assertEqual(
+			self.call("get_line_values_outcome", "B", "other-request")["status"], "STALE_REPREVIEW"
+		)
+		self.store.denied.add(("BOQ", "B", "read"))
+		with self.assertRaises(PermissionError):
+			self.call("get_line_values_outcome", "B", "req-1")
+		self.store.denied.clear()
+		with patch(
+			"frappe.utils.verified_command.get_signed_params",
+			side_effect=lambda params: (
+				params
+				+ "&_signature="
+				+ hmac.new(b"other-site-test-key", params.encode(), hashlib.sha512).hexdigest()
+			),
+		):
+			self.assertEqual(self.call("get_line_values_outcome", "B", "req-1")["status"], "STALE_REPREVIEW")
 
 	def test_quantity_edit_preserves_unrequested_snapshot_rate_precision(self):
 		# PR #13's production snapshots can carry more digits than display precision.
