@@ -624,6 +624,7 @@ class TestBOQLineValues(unittest.TestCase):
 
 	def test_maintenance_outcome_read_takes_no_locks(self):
 		preview = self.preview()
+		self.store.flags.read_only = True
 
 		def read_only(doctype, name):
 			raise ValueError("InReadOnlyMode")
