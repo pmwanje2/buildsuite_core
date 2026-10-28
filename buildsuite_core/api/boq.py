@@ -1143,3 +1143,110 @@ def get_line_values_outcome(boq, request_id, fingerprint=None):
 		"request_id": request_id,
 		"status": "NOT_APPLIED_SAFE_RETRY" if safe else "STALE_REPREVIEW",
 	}
+
+
+# --- explicit native bulk jobs (Gap #6154, WP-17 Slice 2) ------------------
+
+
+def _line_job_id(boq, request_id):
+	# Native enqueue/get_job_status add the site namespace. Hash the tuple so
+	# Frappe's colon normalization cannot collapse caller-controlled identifiers.
+	return "buildsuite-boq-lines::" + _line_hash([boq, request_id, frappe.session.user])
+
+
+def _line_job_outcome(boq, request_id, fingerprint):
+	outcome = get_line_values_outcome(boq, request_id, fingerprint)
+	if outcome["status"] == "COMMITTED" and outcome.get("actor") != frappe.session.user:
+		_line_values_refuse("BOQ_LINES_REQUEST_ACTOR_MISMATCH", permission=True)
+	# Progress readers never receive preview financials or raw job kwargs/logs.
+	return {
+		key: outcome[key]
+		for key in ("boq", "request_id", "status", "fingerprint", "line_count")
+		if key in outcome
+	}
+
+
+def _line_job_request(boq, changes, fingerprint, request_id, edit_other_draft):
+	_line_request_id(request_id)
+	changes = _line_changes(changes)
+	if edit_other_draft not in (0, 1, "0", "1"):
+		_line_values_refuse("BOQ_LINES_INVALID")
+	doc = frappe.get_doc("BOQ", boq)
+	_require_write(doc)
+	names = set(frappe.get_all("BOQ Item", filters={"boq": doc.name}, pluck="name"))
+	for change in changes:
+		if change["boq_item"] not in names:
+			_line_values_refuse("BOQ_LINE_NOT_IN_BOQ")
+		if not _line_can_write(frappe.get_doc("BOQ Item", change["boq_item"]), change):
+			_line_values_refuse("BOQ_LINE_FIELD_NOT_PERMITTED", permission=True)
+	if doc.owner != frappe.session.user and not cint(edit_other_draft):
+		_line_values_refuse("BOQ_DRAFT_OWNER_ACK_REQUIRED")
+	# This native recovery read locks the BOQ in a writable transaction. Keep
+	# the actor check and executor serialized, including two actors' queued jobs.
+	outcome = _line_job_outcome(boq, request_id, fingerprint)
+	if outcome["status"] == "COMMITTED":
+		if outcome["fingerprint"] != fingerprint or fingerprint.split(".")[-1] != _line_hash(
+			_line_canonical(changes)
+		):
+			_line_values_refuse("BOQ_LINES_STALE")
+		return changes, outcome
+	preview = preview_update_line_values(boq, changes, request_id)
+	for line in preview["lines"]:
+		if line["reason"]:
+			_line_values_refuse(line["reason"], permission=line["reason"] == "BOQ_LINE_FIELD_NOT_PERMITTED")
+	if not fingerprint or fingerprint != preview["fingerprint"]:
+		_line_values_refuse("BOQ_LINES_STALE")
+	return changes, outcome
+
+
+def _run_update_line_values(boq, changes, fingerprint, request_id, edit_other_draft=0):
+	"""Private dispatch only; Frappe restores the enqueuer, never caller identity."""
+	from rq import get_current_job
+
+	job = get_current_job()
+	identity = job.kwargs if job else {}
+	# At the v16 production pin, recursive deadlock retries lose execute_job's
+	# user argument. Fail closed against native RQ metadata; never elevate or
+	# set a caller-supplied user. A fresh explicit retry uses the same receipt.
+	if identity.get("user") != frappe.session.user or identity.get("site") != frappe.local.site:
+		_line_values_refuse("BOQ_LINES_JOB_IDENTITY_MISMATCH", permission=True)
+	changes, outcome = _line_job_request(boq, changes, fingerprint, request_id, edit_other_draft)
+	if outcome["status"] == "COMMITTED":
+		return outcome
+	update_line_values(boq, changes, fingerprint, request_id, test_run=0, edit_other_draft=edit_other_draft)
+	return _line_job_outcome(boq, request_id, fingerprint)
+
+
+@frappe.whitelist(methods=["POST"])
+def enqueue_update_line_values(boq, changes, fingerprint, request_id, edit_other_draft=0):
+	"""Explicit opt-in bulk API. No synchronous/single-line caller is redirected."""
+	changes, outcome = _line_job_request(boq, changes, fingerprint, request_id, edit_other_draft)
+	if outcome["status"] == "COMMITTED":
+		return outcome
+	job_id = _line_job_id(boq, request_id)
+	frappe.enqueue(
+		"buildsuite_core.api.boq._run_update_line_values",
+		queue="long",
+		job_id=job_id,
+		deduplicate=True,
+		enqueue_after_commit=True,
+		boq=boq,
+		changes=changes,
+		fingerprint=fingerprint,
+		request_id=request_id,
+		edit_other_draft=cint(edit_other_draft),
+	)
+	return {**outcome, "job_id": job_id, "progress": "PENDING_COMMIT"}
+
+
+@frappe.whitelist()
+def get_line_values_job_status(boq, request_id, fingerprint=None):
+	"""RQ is progress only; even finished/expired jobs cannot prove commit."""
+	from frappe.utils.background_jobs import get_job_status
+
+	outcome = _line_job_outcome(boq, request_id, fingerprint)
+	job_id = _line_job_id(boq, request_id)
+	progress = {"queued": "QUEUED", "started": "RUNNING", "failed": "FAILED"}.get(
+		get_job_status(job_id), "UNKNOWN"
+	)
+	return {**outcome, "job_id": job_id, "progress": progress}
