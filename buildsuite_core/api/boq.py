@@ -1180,12 +1180,22 @@ def _line_job_request(boq, changes, fingerprint, request_id, edit_other_draft):
 
 def _run_update_line_values(boq, changes, fingerprint, request_id, edit_other_draft=0):
 	"""Private dispatch only; Frappe restores the enqueuer, never caller identity."""
+	from rq import get_current_job
+
+	job = get_current_job()
+	identity = job.kwargs if job else {}
+	# At the v16 production pin, recursive deadlock retries lose execute_job's
+	# user argument. Fail closed against native RQ metadata; never elevate or
+	# set a caller-supplied user. A fresh explicit retry uses the same receipt.
+	if identity.get("user") != frappe.session.user or identity.get("site") != frappe.local.site:
+		_line_values_refuse("BOQ_LINES_JOB_IDENTITY_MISMATCH", permission=True)
 	changes, outcome = _line_job_request(boq, changes, fingerprint, request_id, edit_other_draft)
 	if outcome["status"] == "COMMITTED":
 		return outcome
-	return update_line_values(
+	update_line_values(
 		boq, changes, fingerprint, request_id, test_run=0, edit_other_draft=edit_other_draft
 	)
+	return _line_job_outcome(boq, request_id, fingerprint)
 
 
 @frappe.whitelist(methods=["POST"])
