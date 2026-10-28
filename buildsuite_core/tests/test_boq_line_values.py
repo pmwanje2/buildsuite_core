@@ -516,6 +516,15 @@ class TestBOQLineValues(unittest.TestCase):
 		self.assertIn("totals", result)
 		self.assertNotIn("Concrete", self.store.comments[0]["content"])
 
+	def test_quantity_edit_preserves_unrequested_snapshot_rate_precision(self):
+		# PR #13's production snapshots can carry more digits than display precision.
+		self.store.rows["BOQ Item", "A"].update(rate="10.005", planned_amount="20.010")
+		changes = [{"boq_item": "A", "planned_qty": "3"}]
+		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["after"]["planned_amount"], "30.02")
+		self.commit(changes, preview)
+		self.assertEqual(self.store.rows["BOQ Item", "A"]["rate"], "10.005")
+
 
 if __name__ == "__main__":
 	unittest.main()
