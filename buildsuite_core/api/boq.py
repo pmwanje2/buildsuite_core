@@ -1213,9 +1213,7 @@ def _run_update_line_values(boq, changes, fingerprint, request_id, edit_other_dr
 	changes, outcome = _line_job_request(boq, changes, fingerprint, request_id, edit_other_draft)
 	if outcome["status"] == "COMMITTED":
 		return outcome
-	update_line_values(
-		boq, changes, fingerprint, request_id, test_run=0, edit_other_draft=edit_other_draft
-	)
+	update_line_values(boq, changes, fingerprint, request_id, test_run=0, edit_other_draft=edit_other_draft)
 	return _line_job_outcome(boq, request_id, fingerprint)
 
 
