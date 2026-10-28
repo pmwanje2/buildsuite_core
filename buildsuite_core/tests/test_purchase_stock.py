@@ -203,28 +203,22 @@ class TestPurchaseStockProjectField(BuildSuiteTestCase):
 
 
 class TestRateMasterConfirmEndpoint(BuildSuiteTestCase):
-	def test_rate_confirm_writes_rate_and_history_log(self):
-		# BUY-025 — confirming a rate update via the PO-submit endpoint writes
-		# the new current_rate AND appends a "Purchase-driven" history row
-		# (distinct from a plain manual edit's "Manual revision" reason).
+	def test_retired_rate_confirm_preserves_rate_and_history_log(self):
+		# BUY-025 — POs cannot release a new standard estimating price.
 		rm = self._make_rate_master(rate=100)
-		changed = rm_api.update_rates_from_po(
-			purchase_order="PO-UAT-TEST",
-			updates=[{"rate_master": rm.name, "new_rate": 150}],
-			supplier="UAT Supplier X",
-		)
-		self.assertEqual(changed, [rm.name])
+		history = [row.as_dict() for row in rm.rate_history]
+		with self.assertRaisesRegex(frappe.ValidationError, "Purchase orders no longer"):
+			rm_api.update_rates_from_po(
+				purchase_order="PO-UAT-TEST",
+				updates=[{"rate_master": rm.name, "new_rate": 150}],
+				supplier="UAT Supplier X",
+			)
 		rm.reload()
-		self.assertEqual(rm.current_rate, 150)
-		self.assertEqual(rm.previous_rate, 100)
-		new_row = rm.rate_history[-1]
-		self.assertEqual(new_row.reason, "Purchase-driven")
-		self.assertEqual(new_row.purchase_order, "PO-UAT-TEST")
+		self.assertEqual(rm.current_rate, 100)
+		self.assertEqual([row.as_dict() for row in rm.rate_history], history)
 
 	def test_estimate_snapshots_unaffected_by_rate_confirm(self):
-		# BUY-031 — confirming a rate change through this specific endpoint
-		# (not just any direct DB write) still leaves an already-created BOQ
-		# Sub Item's snapshot rate untouched.
+		# BUY-031 — even an attempted retired write leaves snapshots untouched.
 		p = self._make_project(company=self.company)
 		b = frappe.get_doc(
 			{"doctype": "BOQ", "project": p.name, "title": "Snap", "margin_rate": 10, "tax_rate": 18}
@@ -257,8 +251,9 @@ class TestRateMasterConfirmEndpoint(BuildSuiteTestCase):
 		).insert(ignore_permissions=True)
 		self.assertEqual(si.rate, 500)
 
-		rm_api.update_rates_from_po(
-			purchase_order="PO-UAT-TEST-2", updates=[{"rate_master": rm.name, "new_rate": 900}]
-		)
+		with self.assertRaisesRegex(frappe.ValidationError, "Purchase orders no longer"):
+			rm_api.update_rates_from_po(
+				purchase_order="PO-UAT-TEST-2", updates=[{"rate_master": rm.name, "new_rate": 900}]
+			)
 		si.reload()
 		self.assertEqual(si.rate, 500)  # snapshot unaffected by the later rate confirm

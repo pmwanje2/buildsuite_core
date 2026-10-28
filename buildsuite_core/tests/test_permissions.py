@@ -378,14 +378,13 @@ class TestPermissions(BuildSuiteTestCase):
 			frappe.set_user("Administrator")
 
 	def test_rate_update_guard_rejects_non_governance(self):
-		# PERM-013 — the PO-submit rate-update endpoint rejects a non-governance role
-		# and accepts the empowered Procurement Officer.
+		# PERM-013 — the retired path refuses both non-governance and Procurement.
 		from buildsuite_core.api import rate_master as rm
 
 		self._as("Foreman / Supervisor", "fm")
 		try:
 			self.assertRaises(
-				frappe.PermissionError,
+				frappe.ValidationError,
 				rm.update_rates_from_po,
 				purchase_order="PO-TEST",
 				updates=[],
@@ -395,7 +394,8 @@ class TestPermissions(BuildSuiteTestCase):
 
 		self._as("Procurement Officer", "proc")
 		try:
-			self.assertEqual(rm.update_rates_from_po(purchase_order="PO-TEST", updates=[]), [])
+			with self.assertRaisesRegex(frappe.ValidationError, "Purchase orders no longer"):
+				rm.update_rates_from_po(purchase_order="PO-TEST", updates=[])
 		finally:
 			frappe.set_user("Administrator")
 
