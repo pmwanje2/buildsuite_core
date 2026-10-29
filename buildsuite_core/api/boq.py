@@ -664,6 +664,7 @@ def _line_changes(changes):
 	shapes = (
 		{"boq_item", "rate"},
 		{"boq_item", "planned_qty"},
+		{"boq_item", "rate", "planned_qty"},
 		{"boq_item", "rate_change_percent"},
 		{"boq_item", "rate", "assembly"},
 	)
