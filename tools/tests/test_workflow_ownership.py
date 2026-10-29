@@ -21,7 +21,21 @@ class Doc(types.SimpleNamespace):
 	def set(self, field, value):
 		setattr(self, field, value)
 
-	def insert(self, **_kwargs):
+	def insert(self, **kwargs):
+		if kwargs.get("ignore_links") or getattr(self.flags, "ignore_links", False):
+			raise AssertionError("Role links must be validated")
+		if getattr(self, "doctype", None) == "Role":
+			if self.role_name in self.roles:
+				raise AssertionError(f"Existing Role must not be inserted: {self.role_name}")
+			self.roles.add(self.role_name)
+			return self
+		# Validate the moved fixture payloads at the same boundary as Document.insert.
+		if getattr(self, "doctype", None) == "Workflow":
+			for rows, field in ((self.states, "allow_edit"), (self.transitions, "allowed")):
+				for row in rows:
+					role = getattr(row, field)
+					if role not in self.roles:
+						raise AssertionError(f"LinkValidationError: Could not find Role: {role}")
 		self.name = self.workflow_name
 		self.store[self.name] = self
 		return self
@@ -33,24 +47,27 @@ class Doc(types.SimpleNamespace):
 		return {
 			key: [row.as_dict() for row in value] if isinstance(value, list) else value
 			for key, value in vars(self).items()
-			if key not in ("store", "flags")
+			if key not in ("store", "flags", "roles")
 		}
 
 
-def document(payload, store):
+def document(payload, store, roles=None):
+	if payload.get("doctype") == "Role":
+		assert set(payload) <= {"doctype", "role_name", "desk_access"}, "Do not grant permissions"
 	values = copy.deepcopy(payload)
 	for key in ("states", "transitions"):
 		values[key] = [Doc(**row) for row in values.get(key, [])]
-	return Doc(**values, store=store, flags=types.SimpleNamespace())
+	return Doc(**values, store=store, roles=roles, flags=types.SimpleNamespace())
 
 
 class WorkflowOwnershipTests(unittest.TestCase):
 	def setUp(self):
 		self.store = {}
+		self.roles = {"BuildSuite Administrator"}
 		self.frappe = types.ModuleType("frappe")
 		self.frappe.db = types.SimpleNamespace(exists=self.exists)
 		self.frappe.get_doc = lambda dt, name=None: (
-			document(dt, self.store) if isinstance(dt, dict) else self.store[name]
+			document(dt, self.store, self.roles) if isinstance(dt, dict) else self.store[name]
 		)
 		self.frappe.new_doc = lambda _dt: document({}, self.store)
 		self.modules = patch.dict(sys.modules, {"frappe": self.frappe})
@@ -66,8 +83,10 @@ class WorkflowOwnershipTests(unittest.TestCase):
 		return module
 
 	def exists(self, doctype, filters):
+		if doctype == "Role":
+			return filters in self.roles
 		if doctype != "Workflow":
-			return True  # Shared masters and shipped roles already exist.
+			return True  # Shared workflow masters already exist.
 		if isinstance(filters, str):
 			return filters in self.store
 		return any(
@@ -92,6 +111,7 @@ class WorkflowOwnershipTests(unittest.TestCase):
 		self.assertNotIn("Workflow", [row if isinstance(row, str) else row["doctype"] for row in fixtures])
 
 	def test_fresh_install_preserves_three_defaults_with_material_request_opt_in(self):
+		self.assertEqual({"BuildSuite Administrator"}, self.roles)
 		created = self.seed.seed_default_workflows()
 		for expected in DEFAULTS:
 			with self.subTest(doctype=expected["document_type"]):
@@ -102,6 +122,12 @@ class WorkflowOwnershipTests(unittest.TestCase):
 						0 if key == "is_active" and expected["document_type"] == "Material Request" else value
 					)
 					self.assertEqual(want, wf[key], key)
+				for rows, field in ((wf["states"], "allow_edit"), (wf["transitions"], "allowed")):
+					for row in rows:
+						self.assertIn(row[field], self.roles)
+		self.assertFalse(any(
+			wf.is_active for wf in self.store.values() if wf.document_type == "Material Request"
+		))
 		# Existing finance defaults remain opt-in, not silently enabled.
 		self.assertEqual(0, self.store["Purchase Invoice Approval"].is_active)
 
@@ -113,6 +139,7 @@ class WorkflowOwnershipTests(unittest.TestCase):
 			self.store[wf.name] = wf
 		before = {name: wf.as_dict() for name, wf in self.store.items()}
 		self.seed.seed_default_workflows()
+		self.assertEqual({"BuildSuite Administrator"}, self.roles)
 		for name, value in before.items():
 			self.assertEqual(value, self.store[name].as_dict())
 
@@ -123,10 +150,25 @@ class WorkflowOwnershipTests(unittest.TestCase):
 			wf.is_active = 0
 			self.store[wf.name] = wf
 		created = self.seed.seed_default_workflows()
+		self.assertEqual({"BuildSuite Administrator"}, self.roles)
 		for expected in DEFAULTS:
 			self.assertNotIn(expected["name"], created)
 			self.assertNotIn(expected["name"], self.store)
 		self.assertEqual([], self.seed.seed_default_workflows())
+
+	def test_existing_roles_are_reused_and_repeat_seed_is_a_no_op(self):
+		self.roles.update(
+			row[field]
+			for default in DEFAULTS
+			for rows, field in ((default["states"], "allow_edit"), (default["transitions"], "allowed"))
+			for row in rows
+		)
+		before_roles = self.roles.copy()
+		self.seed.seed_default_workflows()
+		before = {name: wf.as_dict() for name, wf in self.store.items()}
+		self.assertEqual([], self.seed.seed_default_workflows())
+		self.assertEqual(before_roles, self.roles)
+		self.assertEqual(before, {name: wf.as_dict() for name, wf in self.store.items()})
 
 	def test_restore_permissions_does_not_rewrite_customer_stage_workflow(self):
 		original = next(row for row in DEFAULTS if row["document_type"] == "Stage Planning")
