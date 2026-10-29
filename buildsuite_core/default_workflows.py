@@ -21,6 +21,8 @@ from copy import deepcopy
 
 import frappe
 
+from buildsuite_core.permissions.setup import _ensure_role
+
 _DEFAULT_WORKFLOWS = [
 	{
 		"doctype": "Workflow",
@@ -727,6 +729,10 @@ def seed_default_workflows():
 			"Workflow", {"document_type": default["document_type"]}
 		):
 			continue
+		for row in default["states"]:
+			_ensure_role(row["allow_edit"])
+		for row in default["transitions"]:
+			_ensure_role(row["allowed"])
 		frappe.get_doc(deepcopy(default)).insert(ignore_permissions=True)
 		created.append(default["name"])
 	return created
