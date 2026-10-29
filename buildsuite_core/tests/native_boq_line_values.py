@@ -102,6 +102,102 @@ class NativeAmendLineValues(unittest.TestCase):
 			Decimal("7826670.70"),
 		)
 
+	def test_native_combined_one_version_one_rollup_and_canonical_retry(self):
+		item = self.items[0]
+		changes = [{"boq_item": item.name, "rate": "12.50", "planned_qty": "3.125"}]
+		filters = {"ref_doctype": "BOQ Item", "docname": item.name}
+		versions = frappe.db.count("Version", filters)
+		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["after"]["planned_amount"], "39.06")
+		self.assertEqual(frappe.db.count("Version", filters), versions)
+		self.assertEqual(frappe.db.get_value("BOQ Item", item.name, "rate"), 10)
+		self.assertEqual(frappe.db.get_value("BOQ Item", item.name, "planned_qty"), 2)
+		with patch.object(api, "recompute_boq", wraps=api.recompute_boq) as rollup:
+			result = self.commit(changes, preview)
+			canonical = [{"planned_qty": 3.125, "rate": "12.500", "boq_item": item.name}]
+			self.assertEqual(self.commit(canonical, preview), result)
+			self.assertEqual(rollup.call_count, 1)
+		self.assertEqual(result["status"], "COMMITTED")
+		self.assertEqual(result["line_count"], 1)
+		self.assertEqual(api.get_line_values_outcome(self.boq.name, "amend-native"), result)
+		self.assertFalse({"lines", "groups", "totals", "rate", "planned_qty"} & result.keys())
+		self.assertEqual(frappe.db.get_value("BOQ Item", item.name, "rate"), 12.5)
+		self.assertEqual(frappe.db.get_value("BOQ Item", item.name, "planned_qty"), 3.125)
+		self.assertEqual(frappe.db.get_value("BOQ", self.boq.name, "planned_amount"), 59.0625)
+		new_versions = frappe.get_all("Version", filters=filters, fields=["owner", "data"])
+		self.assertEqual(len(new_versions), versions + 1)
+		self.assertEqual(new_versions[0].owner, "wp17-qs@example.test")
+		changed = {row[0] for row in json.loads(new_versions[0].data)["changed"]}
+		self.assertTrue({"rate", "planned_qty"} <= changed)
+		self.assertEqual(
+			frappe.db.count("Comment", {"reference_name": self.boq.name, "comment_type": "Comment"}), 1
+		)
+
+	def test_native_combined_buildup_refuses_both_fields_and_batch(self):
+		item = self.items[0]
+		frappe.db.set_value("BOQ Item", item.name, "assembly", self.assembly.name)
+		changes = [
+			{"boq_item": item.name, "rate": "12", "planned_qty": "3"},
+			{"boq_item": self.items[1].name, "rate": "13"},
+		]
+		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["reason"], "BOQ_LINE_RATE_FROM_BUILDUP")
+		self.assertEqual(preview["lines"][0]["after"], preview["lines"][0]["before"])
+		versions = frappe.db.count("Version", {"ref_doctype": "BOQ Item"})
+		with self.assertRaisesRegex(frappe.ValidationError, "BOQ_LINE_RATE_FROM_BUILDUP"):
+			self.commit(changes, preview)
+		self.assertEqual(frappe.db.count("Version", {"ref_doctype": "BOQ Item"}), versions)
+		for line in self.items:
+			self.assertEqual(frappe.db.get_value("BOQ Item", line.name, "rate"), 10)
+			self.assertEqual(frappe.db.get_value("BOQ Item", line.name, "planned_qty"), 2)
+
+	def test_native_combined_each_field_precision_and_tamper_refuse(self):
+		changes = [{"boq_item": self.items[0].name, "rate": "12.50", "planned_qty": "3.125"}]
+		preview = self.preview(changes)
+		for field, value in (("rate", "12.501"), ("planned_qty", "3.1251")):
+			with self.subTest(precision_field=field):
+				invalid = [{**changes[0], field: value}]
+				refused = self.preview(invalid)
+				self.assertEqual(refused["lines"][0]["reason"], "BOQ_LINE_PRECISION_EXCEEDED")
+				self.assertEqual(refused["lines"][0]["after"], refused["lines"][0]["before"])
+				with self.assertRaisesRegex(frappe.ValidationError, "BOQ_LINE_PRECISION_EXCEEDED"):
+					self.commit(invalid, refused)
+		for field, value in (("rate", "13"), ("planned_qty", "4")):
+			with self.subTest(tampered_field=field):
+				with self.assertRaisesRegex(frappe.ValidationError, "BOQ_LINES_STALE"):
+					self.commit([{**changes[0], field: value}], preview)
+		self.assertEqual(frappe.db.get_value("BOQ Item", self.items[0].name, "rate"), 10)
+		self.assertEqual(frappe.db.get_value("BOQ Item", self.items[0].name, "planned_qty"), 2)
+
+	def test_native_combined_each_field_permlevel_refuses_without_reset(self):
+		from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+		changes = [{"boq_item": self.items[0].name, "rate": "12", "planned_qty": "3"}]
+		preview = self.preview(changes)
+		for field in ("rate", "planned_qty"):
+			with self.subTest(field=field):
+				frappe.set_user("Administrator")
+				make_property_setter(
+					"BOQ Item", field, "permlevel", 1, "Int", validate_fields_for_doctype=False
+				)
+				frappe.clear_cache(doctype="BOQ Item")
+				frappe.set_user("wp17-qs@example.test")
+				try:
+					refused = self.preview(changes)["lines"][0]
+					self.assertEqual(refused["reason"], "BOQ_LINE_FIELD_NOT_PERMITTED")
+					self.assertEqual(refused["after"], refused["before"])
+					with self.assertRaisesRegex(frappe.PermissionError, "BOQ_LINE_FIELD_NOT_PERMITTED"):
+						self.commit(changes, preview)
+				finally:
+					frappe.set_user("Administrator")
+					frappe.db.delete(
+						"Property Setter",
+						{"doc_type": "BOQ Item", "field_name": field, "property": "permlevel"},
+					)
+					frappe.clear_cache(doctype="BOQ Item")
+		self.assertEqual(frappe.db.get_value("BOQ Item", self.items[0].name, "rate"), 10)
+		self.assertEqual(frappe.db.get_value("BOQ Item", self.items[0].name, "planned_qty"), 2)
+
 	def test_native_assembly_missing_disabled_and_buildup_refused(self):
 		changes = [{"boq_item": self.items[0].name, "rate": "12", "assembly": "TEST-MISSING"}]
 		self.assertEqual(self.preview(changes)["lines"][0]["reason"], "BOQ_LINE_ASSEMBLY_NOT_FOUND")

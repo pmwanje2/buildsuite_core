@@ -313,7 +313,7 @@ class TestBOQLineValues(unittest.TestCase):
 		self.preview()  # The RED is missing executor behavior, not an exception mismatch.
 		for changes, reason in [
 			([{"boq_item": "A", "rate": "12"}, {"boq_item": "Z", "owner": "attacker"}], "BOQ_LINES_INVALID"),
-			([{"boq_item": "A", "rate": "12", "planned_qty": "3"}], "BOQ_LINES_INVALID"),
+			([{"boq_item": "A", "rate_change_percent": "12", "planned_qty": "3"}], "BOQ_LINES_INVALID"),
 			([{"boq_item": "A", "rate": "12"}] * 2, "BOQ_LINES_INVALID"),
 			([{"boq_item": f"I-{i}", "rate": "1"} for i in range(1001)], "BOQ_LINES_TOO_MANY"),
 		]:
@@ -336,6 +336,158 @@ class TestBOQLineValues(unittest.TestCase):
 		self.store.rows["BOQ Item", "Z"]["boq"] = "OTHER"
 		with self.assertRaisesRegex(ValueError, "BOQ_LINE_NOT_IN_BOQ"):
 			self.commit(changes, preview)
+
+	def test_combined_preview_and_commit_save_both_fields_once(self):
+		changes = [{"boq_item": "A", "rate": "12.50", "planned_qty": "3.125"}]
+		before = copy.deepcopy(self.store.rows)
+		preview = self.preview(changes)
+		self.assertEqual(preview["lines"][0]["status"], "OK")
+		self.assertEqual(
+			preview["lines"][0]["after"],
+			{"rate": "12.50", "planned_qty": "3.125", "planned_amount": "39.06", "assembly": None},
+		)
+		self.assertEqual(preview["totals"]["after"]["planned_amount"], "54.06")
+		self.unchanged(before)
+		self.assertFalse(self.store.events)
+		result = self.commit(changes, preview)
+		self.assertEqual(result["status"], "COMMITTED")
+		self.assertEqual(result["line_count"], 1)
+		self.assertEqual(self.store.rows["BOQ Item", "A"]["rate"], "12.50")
+		self.assertEqual(self.store.rows["BOQ Item", "A"]["planned_qty"], "3.125")
+		self.assertEqual(self.store.versions, ["A"])
+		self.assertEqual([e for e in self.store.events if e[0] == "save"], [("save", "BOQ Item", "A", True)])
+		self.assertEqual([e for e in self.store.events if e[0] == "rollup"], [("rollup", "B")])
+		self.assertEqual(len(self.store.comments), 1)
+		payload = json.loads(html.unescape(self.store.comments[0]["content"][5:-6]))
+		signature = payload.pop("signature")
+		self.assertEqual(signature, api._line_outcome_signature(payload))
+		self.assertEqual(payload["outcome"], result)
+		self.assertEqual(
+			set(result),
+			{
+				"status",
+				"boq",
+				"request_id",
+				"fingerprint",
+				"actor",
+				"line_count",
+				"edit_other_draft",
+				"currency",
+				"owner",
+				"owner_ack_required",
+			},
+		)
+
+	def test_combined_buildup_rate_refuses_both_fields_and_whole_batch(self):
+		changes = [{"boq_item": "A", "rate": "12", "planned_qty": "4"}, {"boq_item": "Z", "rate": "6"}]
+		for source in ("assembly", "sub_items"):
+			with self.subTest(source=source):
+				if source == "assembly":
+					self.store.rows["BOQ Item", "A"]["assembly"] = "ASM"
+				else:
+					self.store.rows["BOQ Item", "A"]["assembly"] = None
+					self.store.add("BOQ Sub Item", "SUB", boq="B", boq_item="A")
+				before = copy.deepcopy(self.store.rows)
+				preview = self.preview(changes)
+				line = preview["lines"][0]
+				self.assertEqual(line["reason"], "BOQ_LINE_RATE_FROM_BUILDUP")
+				self.assertEqual(line["after"], line["before"])
+				self.assertEqual(preview["lines"][1]["status"], "OK")
+				with self.assertRaisesRegex(ValueError, "BOQ_LINE_RATE_FROM_BUILDUP"):
+					self.commit(changes, preview)
+				self.unchanged(before)
+				self.assertFalse(any(e[0] in ("save", "rollup") for e in self.store.events))
+
+	def test_combined_precision_and_invalid_values_refuse_the_entire_line(self):
+		for field, value, reason in (
+			("rate", "12.501", "BOQ_LINE_PRECISION_EXCEEDED"),
+			("planned_qty", "3.1251", "BOQ_LINE_PRECISION_EXCEEDED"),
+			("rate", "-1", "BOQ_LINE_VALUE_INVALID"),
+			("planned_qty", "NaN", "BOQ_LINE_VALUE_INVALID"),
+		):
+			with self.subTest(field=field, value=value):
+				changes = [{"boq_item": "A", "rate": "12.50", "planned_qty": "3.125", field: value}]
+				before = copy.deepcopy(self.store.rows)
+				preview = self.preview(changes)
+				self.assertEqual(preview["lines"][0]["reason"], reason)
+				self.assertEqual(preview["lines"][0]["after"], preview["lines"][0]["before"])
+				with self.assertRaisesRegex(ValueError, reason):
+					self.commit(changes, preview)
+				self.unchanged(before)
+
+	def test_combined_checks_each_fields_rights_at_preview_and_commit(self):
+		changes = [{"boq_item": "A", "rate": "12", "planned_qty": "3"}]
+		preview = self.preview(changes)
+		before = copy.deepcopy(self.store.rows)
+		for field in ("rate", "planned_qty"):
+			with self.subTest(field=field):
+				self.store.denied_fields.add(("A", field))
+				refused = self.preview(changes)["lines"][0]
+				self.assertEqual(refused["reason"], "BOQ_LINE_FIELD_NOT_PERMITTED")
+				self.assertEqual(refused["after"], refused["before"])
+				with self.assertRaisesRegex(PermissionError, "BOQ_LINE_FIELD_NOT_PERMITTED"):
+					self.commit(changes, preview)
+				self.store.denied_fields.clear()
+				self.store.denied_read_fields.add(("A", field))
+				with self.assertRaisesRegex(PermissionError, "BOQ_LINE_FIELD_NOT_PERMITTED"):
+					self.preview(changes)
+				self.store.denied_read_fields.clear()
+				self.unchanged(before)
+
+	def test_combined_fingerprint_binds_each_field_and_canonical_retry(self):
+		changes = [{"boq_item": "A", "rate": "12.50", "planned_qty": "3.125"}]
+		preview = self.preview(changes)
+		before = copy.deepcopy(self.store.rows)
+		for field, value in (("rate", "13"), ("planned_qty", "4")):
+			with self.subTest(field=field):
+				with self.assertRaisesRegex(ValueError, "BOQ_LINES_STALE"):
+					self.commit([{**changes[0], field: value}], preview)
+				self.unchanged(before)
+		with self.assertRaisesRegex(ValueError, "BOQ_LINES_STALE"):
+			self.commit(changes, {"fingerprint": "tampered"})
+		self.unchanged(before)
+		canonical = [{"planned_qty": 3.125, "boq_item": "A", "rate": "12.500"}]
+		self.assertEqual(self.preview(canonical)["fingerprint"], preview["fingerprint"])
+		result = self.commit(changes, preview)
+		self.assertEqual(self.commit(canonical, preview), result)
+		self.assertEqual(self.call("get_line_values_outcome", "B", "req-1"), result)
+		for field, value in (("rate", "13"), ("planned_qty", "4")):
+			with self.subTest(retry_field=field):
+				with self.assertRaisesRegex(ValueError, "BOQ_LINES_STALE"):
+					self.commit([{**changes[0], field: value}], preview)
+		self.assertEqual(self.store.versions, ["A"])
+		self.assertEqual(len(self.store.comments), 1)
+		self.assertEqual(len([e for e in self.store.events if e[0] == "rollup"]), 1)
+
+	def test_combined_save_failure_rolls_back_both_fields_and_batch(self):
+		changes = [{"boq_item": "A", "rate": "12", "planned_qty": "3"}, {"boq_item": "Z", "rate": "6"}]
+		preview = self.preview(changes)
+		before = copy.deepcopy(self.store.rows)
+		self.store.fail_save = "Z"
+		with self.assertRaisesRegex(ValueError, "native validation refused"):
+			self.commit(changes, preview)
+		self.unchanged(before)
+		self.assertIsNone(self.store.flags.get("boq_skip_rollup"))
+
+	def test_old_shapes_still_preview_and_combined_does_not_admit_extra_shapes(self):
+		self.store.add("Assembly", "ASM")
+		for change, rate, qty, assembly in (
+			({"rate": "12"}, "12.00", "2.000", None),
+			({"planned_qty": "3"}, "10.00", "3.000", None),
+			({"rate_change_percent": "5"}, "10.50", "2.000", None),
+			({"rate": "12", "assembly": "ASM"}, "12.00", "2.000", "ASM"),
+		):
+			with self.subTest(change=change):
+				after = self.preview([{"boq_item": "A", **change}])["lines"][0]["after"]
+				self.assertEqual(
+					(after["rate"], after["planned_qty"], after["assembly"]), (rate, qty, assembly)
+				)
+		for extra in ({"assembly": "ASM"}, {"rate_change_percent": "5"}, {"reason": "workbook"}):
+			with self.subTest(extra=extra):
+				with self.assertRaisesRegex(ValueError, "BOQ_LINES_INVALID"):
+					self.preview([{"boq_item": "A", "rate": "12", "planned_qty": "3", **extra}])
+		with self.assertRaisesRegex(ValueError, "BOQ_LINES_INVALID"):
+			self.preview([{"boq_item": "A", "rate": "12"}, {"boq_item": "A", "planned_qty": "3"}])
 
 	def test_permlevel_without_write_refused_not_reset(self):
 		changes = [{"boq_item": "A", "rate": "12"}]
