@@ -49,7 +49,9 @@ class WorkflowOwnershipTests(unittest.TestCase):
 		self.store = {}
 		self.frappe = types.ModuleType("frappe")
 		self.frappe.db = types.SimpleNamespace(exists=self.exists)
-		self.frappe.get_doc = lambda _dt, name: self.store[name]
+		self.frappe.get_doc = lambda dt, name=None: (
+			document(dt, self.store) if isinstance(dt, dict) else self.store[name]
+		)
 		self.frappe.new_doc = lambda _dt: document({}, self.store)
 		self.modules = patch.dict(sys.modules, {"frappe": self.frappe})
 		self.modules.start()

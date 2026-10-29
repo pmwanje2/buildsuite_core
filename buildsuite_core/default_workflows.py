@@ -1,10 +1,11 @@
 # Copyright (c) 2026, Infraholic Innovations Pvt. Ltd and contributors
 # For license information, please see license.txt
 
-"""Opt-in approval workflows for the submittable finance + procurement documents.
+"""Create-if-missing approval defaults, never migrate-time Workflow fixtures.
 
-The always-on approval flows (Material Request, Scope Change Order, Stage Planning) ship as JSON
-fixtures. These finance/procurement ones ship the SAME five-state lifecycle
+Scope Change Order and Stage Planning default active only without any existing workflow.
+Material Request is inactive (opt-in): vendor content never overrides a customer's
+release strategy. The finance/procurement defaults ship the same five-state lifecycle
 (Draft → Pending Approval → Approved / Rejected, + Cancel) but INACTIVE (is_active=0), so a site
 opts into approval by enabling the workflow in the Workflow list.
 
@@ -16,7 +17,584 @@ The generic Vue bridge (api.workflow + useWorkflow) and each doctype's submit/ca
 defer to an active workflow, so enabling one immediately drives the buttons — nothing else to wire.
 """
 
+from copy import deepcopy
+
 import frappe
+
+_DEFAULT_WORKFLOWS = [
+	{
+		"doctype": "Workflow",
+		"name": "Stage Planning Approval",
+		"workflow_name": "Stage Planning Approval",
+		"document_type": "Stage Planning",
+		"is_active": 1,
+		"override_status": 0,
+		"send_email_alert": 0,
+		"workflow_state_field": "workflow_state",
+		"states": [
+			{
+				"state": "Draft",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 0,
+			},
+			{
+				"state": "Pending Approval",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 0,
+			},
+			{
+				"state": "Approved",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 0,
+			},
+			{
+				"state": "Rejected",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 0,
+			},
+			{
+				"state": "Cancelled",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 1,
+			},
+		],
+		"transitions": [
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Site Engineer",
+				"allow_self_approval": 1,
+				"condition": "doc.owner == frappe.session.user",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Foreman",
+				"allow_self_approval": 1,
+				"condition": "doc.owner == frappe.session.user",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Cancel",
+				"next_state": "Cancelled",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Cancel",
+				"next_state": "Cancelled",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Cancel",
+				"next_state": "Cancelled",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Cancel",
+				"next_state": "Cancelled",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+		],
+	},
+	{
+		"doctype": "Workflow",
+		"name": "Scope Change Order Approval",
+		"workflow_name": "Scope Change Order Approval",
+		"document_type": "Scope Change Order",
+		"is_active": 1,
+		"override_status": 0,
+		"send_email_alert": 0,
+		"workflow_state_field": "status",
+		"states": [
+			{
+				"state": "Pending Approval",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 0,
+			},
+			{"state": "Approved", "doc_status": "0", "allow_edit": "System Manager", "is_optional_state": 0},
+			{
+				"state": "Rejected",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 0,
+			},
+		],
+		"transitions": [
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite QS",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Director",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite QS",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Pending Approval",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+		],
+	},
+	{
+		"doctype": "Workflow",
+		"name": "Material Request Approval",
+		"workflow_name": "Material Request Approval",
+		"document_type": "Material Request",
+		"is_active": 0,
+		"override_status": 0,
+		"send_email_alert": 0,
+		"workflow_state_field": "workflow_state",
+		"states": [
+			{
+				"state": "Draft",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite Project User",
+				"is_optional_state": 0,
+			},
+			{
+				"state": "Pending Approval",
+				"doc_status": "0",
+				"allow_edit": "BuildSuite PM",
+				"is_optional_state": 0,
+			},
+			{"state": "Approved", "doc_status": "1", "allow_edit": "System Manager", "is_optional_state": 0},
+			{"state": "Rejected", "doc_status": "0", "allow_edit": "BuildSuite PM", "is_optional_state": 0},
+			{"state": "Cancelled", "doc_status": "2", "allow_edit": "System Manager", "is_optional_state": 1},
+		],
+		"transitions": [
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Procurement Officer",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Draft",
+				"action": "Submit for Approval",
+				"next_state": "Pending Approval",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite Procurement Officer",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Approve",
+				"next_state": "Approved",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite Procurement Officer",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Pending Approval",
+				"action": "Reject",
+				"next_state": "Rejected",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "BuildSuite PM",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "BuildSuite Procurement Officer",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Rejected",
+				"action": "Revise",
+				"next_state": "Draft",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Cancel",
+				"next_state": "Cancelled",
+				"allowed": "BuildSuite Procurement Officer",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Cancel",
+				"next_state": "Cancelled",
+				"allowed": "BuildSuite Administrator",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+			{
+				"state": "Approved",
+				"action": "Cancel",
+				"next_state": "Cancelled",
+				"allowed": "System Manager",
+				"allow_self_approval": 1,
+				"condition": "",
+			},
+		],
+	},
+]
 
 # (state, doc_status). Mirrors the shipped fixtures' lifecycle.
 _STATES = [
@@ -80,14 +658,14 @@ def _ensure_masters():
 	as fixtures too, but seeded here so this works on a site that never loaded them."""
 	for state, _ in _STATES:
 		if not frappe.db.exists("Workflow State", state):
-			frappe.get_doc(
-				{"doctype": "Workflow State", "workflow_state_name": state}
-			).insert(ignore_permissions=True)
+			frappe.get_doc({"doctype": "Workflow State", "workflow_state_name": state}).insert(
+				ignore_permissions=True
+			)
 	for action in _ACTIONS:
 		if not frappe.db.exists("Workflow Action Master", action):
-			frappe.get_doc(
-				{"doctype": "Workflow Action Master", "workflow_action_name": action}
-			).insert(ignore_permissions=True)
+			frappe.get_doc({"doctype": "Workflow Action Master", "workflow_action_name": action}).insert(
+				ignore_permissions=True
+			)
 
 
 def _build_workflow(doctype, roles):
@@ -130,7 +708,7 @@ def _build_workflow(doctype, roles):
 
 
 def seed_default_workflows():
-	"""Create the opt-in (is_active=0) approval workflows if absent. Idempotent and
+	"""Create approval defaults if absent. Idempotent and
 	non-clobbering: skips any doctype that already has a workflow, so an admin's activation is
 	never reset."""
 	_ensure_masters()
@@ -144,4 +722,11 @@ def seed_default_workflows():
 		if not roles:
 			continue
 		created.append(_build_workflow(doctype, roles))
+	for default in _DEFAULT_WORKFLOWS:
+		if frappe.db.exists("Workflow", default["name"]) or frappe.db.exists(
+			"Workflow", {"document_type": default["document_type"]}
+		):
+			continue
+		frappe.get_doc(deepcopy(default)).insert(ignore_permissions=True)
+		created.append(default["name"])
 	return created

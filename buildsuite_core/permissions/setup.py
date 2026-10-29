@@ -527,6 +527,18 @@ def setup_stage_planning_workflow():
 		return
 
 	wf = frappe.get_doc("Workflow", "Stage Planning Approval")
+	# A matching name is not ownership. Only the unmodified vendor seed is safe
+	# to restore; fail closed for tenant roles, conditions, flags or state edits.
+	from buildsuite_core.default_workflows import _DEFAULT_WORKFLOWS
+
+	default = next(row for row in _DEFAULT_WORKFLOWS if row["document_type"] == "Stage Planning")
+	current = wf.as_dict()
+	for field, value in default.items():
+		actual = current.get(field)
+		if isinstance(value, list):
+			actual = [{key: row.get(key) for key in value[0]} for row in (actual or [])]
+		if actual != value:
+			return
 	for state in wf.states:
 		state.allow_edit = WORKFLOW_EDITOR_ROLE
 
