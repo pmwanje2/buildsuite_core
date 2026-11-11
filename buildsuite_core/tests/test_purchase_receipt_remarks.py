@@ -15,14 +15,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def _on_update(doc):
 	tree = ast.parse((ROOT / "buildsuite_core" / "hooks.py").read_text())
 	assignment = next(
-		node for node in tree.body
+		node
+		for node in tree.body
 		if isinstance(node, ast.Assign)
 		and any(isinstance(target, ast.Name) and target.id == "doc_events" for target in node.targets)
 	)
@@ -59,7 +59,9 @@ def _receipt(remarks, old_remarks):
 
 class TestPurchaseReceiptRemarks(unittest.TestCase):
 	def test_unchanged_operator_remarks_survive_unrelated_save(self):
-		doc = _receipt("Two bags torn; accepted after inspection.", "Two bags torn; accepted after inspection.")
+		doc = _receipt(
+			"Two bags torn; accepted after inspection.", "Two bags torn; accepted after inspection."
+		)
 		_on_update(doc)
 		self.assertEqual(doc.remarks, "Two bags torn; accepted after inspection.")
 
