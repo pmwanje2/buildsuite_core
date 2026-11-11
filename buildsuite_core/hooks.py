@@ -176,9 +176,6 @@ doc_events = {
 	# 	"validate": "buildsuite_core.utils.project.create_warehouse_for_project",
 	# 	"on_trash": "buildsuite_core.utils.project.delete_warehouse_for_project"
 	# },
-    "Purchase Receipt": {
-        "on_update":"buildsuite_core.utils.purchase_receipt.create_remarks"
-    },
 	# A report's roles can't exceed the visibility of a workspace it's tiled in — grant a role a
 	# report only if that role can see the workspace (else the tile never shows). Interactive only;
 	# skipped during install/migrate/patch where seeders set the baseline.
