@@ -90,6 +90,16 @@ def _has_company_write_role(user):
 	)
 
 
+def _has_planner_role(user):
+	"""SAP PS scheduler: configured roles maintain the activities and own stage plans of teamed projects."""
+	planner_roles = frappe.conf.get("project_planner_roles")
+	return bool(
+		isinstance(planner_roles, list)
+		and all(isinstance(role, str) for role in planner_roles)
+		and set(planner_roles) & set(frappe.get_roles(user))
+	)
+
+
 def _is_read_scoped(user):
 	return _is_scoped(user) and not (_has_company_role(user) or _has_company_write_role(user))
 
