@@ -63,7 +63,11 @@ def has_stage_planning_permission(doc, ptype="read", user=None):
 		roles = set(frappe.get_roles(user))
 		if roles & FULL_WRITE_ROLES:
 			return True
-		if (roles & OWN_SCOPE_ROLES or _has_planner_role(user)) and doc.owner == user:
+		if not (roles & OWN_SCOPE_ROLES or _has_planner_role(user)):
+			return False
+		# Ownership must hold on the saved row too: owner is a posted field on save
+		# and Frappe checks this hook before it reloads the document.
+		if doc.owner == user and frappe.db.get_value("Stage Planning", doc.name, "owner") == user:
 			# Gate on the PERSISTED state, not the in-memory value. A workflow
 			# transition (e.g. Submit for Approval) sets workflow_state to the
 			# NEXT state before saving — checking the in-memory value would lock

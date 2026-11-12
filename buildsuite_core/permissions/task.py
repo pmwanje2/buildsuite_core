@@ -91,7 +91,12 @@ def has_task_permission(doc, ptype="read", user=None):
 	# Read / report / print / export need only project visibility; write & delete
 	# additionally honour the Site Engineer / Foreman own-scope rules.
 	if ptype in ("write", "delete"):
+		if _can_modify_task(doc, user):
+			return True
 		# SAP PS scheduler maintains activities of teamed projects; delete stays with DocPerm owners.
-		return _can_modify_task(doc, user) or (ptype == "write" and _has_planner_role(user))
+		# Authorize the saved project, not the posted one, and never a task moved off a project.
+		if ptype == "write" and project and _has_planner_role(user):
+			return _is_project_member(user, frappe.db.get_value("Task", doc.name, "project"))
+		return False
 
 	return True
