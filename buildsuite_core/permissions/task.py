@@ -14,7 +14,12 @@ Creator = Frappe's built-in `owner`. Assignee = Frappe-native assignment (`_assi
 
 import frappe
 
-from buildsuite_core.permissions.project import _is_project_member, _is_read_scoped, _is_scoped
+from buildsuite_core.permissions.project import (
+	_has_planner_role,
+	_is_project_member,
+	_is_read_scoped,
+	_is_scoped,
+)
 
 # Roles with unrestricted write/create/delete within their visible projects —
 # no own-scope restriction applies to them.
@@ -86,6 +91,7 @@ def has_task_permission(doc, ptype="read", user=None):
 	# Read / report / print / export need only project visibility; write & delete
 	# additionally honour the Site Engineer / Foreman own-scope rules.
 	if ptype in ("write", "delete"):
-		return _can_modify_task(doc, user)
+		# SAP PS scheduler maintains activities of teamed projects; delete stays with DocPerm owners.
+		return _can_modify_task(doc, user) or (ptype == "write" and _has_planner_role(user))
 
 	return True

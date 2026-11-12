@@ -10,7 +10,12 @@ Planning Approval workflow (see setup_stage_planning_workflow), not DocPerm.
 
 import frappe
 
-from buildsuite_core.permissions.project import _is_project_member, _is_read_scoped, _is_scoped
+from buildsuite_core.permissions.project import (
+	_has_planner_role,
+	_is_project_member,
+	_is_read_scoped,
+	_is_scoped,
+)
 
 FULL_WRITE_ROLES = {
 	"BuildSuite Director",
@@ -58,7 +63,7 @@ def has_stage_planning_permission(doc, ptype="read", user=None):
 		roles = set(frappe.get_roles(user))
 		if roles & FULL_WRITE_ROLES:
 			return True
-		if roles & OWN_SCOPE_ROLES and doc.owner == user:
+		if (roles & OWN_SCOPE_ROLES or _has_planner_role(user)) and doc.owner == user:
 			# Gate on the PERSISTED state, not the in-memory value. A workflow
 			# transition (e.g. Submit for Approval) sets workflow_state to the
 			# NEXT state before saving — checking the in-memory value would lock
