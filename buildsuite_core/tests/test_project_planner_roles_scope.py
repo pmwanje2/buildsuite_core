@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import unittest
 
-from buildsuite_core.tests.test_project_company_roles_scope import _StubDocument, _load_permission_modules
+from buildsuite_core.tests.test_project_company_roles_scope import _load_permission_modules, _StubDocument
 
 PLANNER = "Project Planner SCL"
 USER = "planner@example.com"
