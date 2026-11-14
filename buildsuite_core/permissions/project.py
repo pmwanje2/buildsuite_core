@@ -153,7 +153,7 @@ def has_project_permission(doc, ptype="read", user=None):
 		user = frappe.session.user
 	if not _is_scoped(user):
 		return True
-	if ptype in ("read", "select", "report", "print", "export") and not _is_read_scoped(user):
+	if ptype in ("read", "select", "report", "print", "export", "attach") and not _is_read_scoped(user):
 		return True
 	if _has_company_write_role(user):
 		return True
