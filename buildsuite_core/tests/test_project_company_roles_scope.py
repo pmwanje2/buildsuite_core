@@ -65,6 +65,78 @@ def _load_permission_modules():
 
 
 class TestProjectCompanyRolesScope(unittest.TestCase):
+	def test_company_read_role_can_attach_to_unteamed_project(self):
+		frappe, modules = _load_permission_modules()
+		frappe.conf["project_company_roles"] = ["Accounts User"]
+		frappe.get_roles = lambda user: ["Accounts User"]
+		frappe.db.exists.return_value = False
+
+		self.assertTrue(
+			modules["project"].has_project_permission(
+				_StubDocument(name="PROJECT-OTHER"), ptype="attach", user="bookkeeper@example.com"
+			)
+		)
+
+	def test_company_read_role_attach_does_not_admit_project_mutations(self):
+		frappe, modules = _load_permission_modules()
+		frappe.conf["project_company_roles"] = ["Accounts User"]
+		frappe.get_roles = lambda user: ["Accounts User"]
+		frappe.db.exists.return_value = False
+
+		for ptype in ("write", "delete", "submit", "cancel"):
+			with self.subTest(ptype=ptype):
+				self.assertFalse(
+					modules["project"].has_project_permission(
+						_StubDocument(name="PROJECT-OTHER"), ptype=ptype, user="bookkeeper@example.com"
+					)
+				)
+
+	def test_team_scoped_project_attach_requires_membership(self):
+		frappe, modules = _load_permission_modules()
+		frappe.get_roles = lambda user: ["BuildSuite Site Engineer"]
+
+		for member in (False, True):
+			with self.subTest(member=member):
+				frappe.db.exists.return_value = member
+				self.assertEqual(
+					modules["project"].has_project_permission(
+						_StubDocument(name="PROJECT-001"), ptype="attach", user="site@example.com"
+					),
+					member,
+				)
+
+	def test_project_attach_config_fails_closed_and_preserves_read_types(self):
+		frappe, modules = _load_permission_modules()
+		frappe.get_roles = lambda user: ["Accounts User"]
+		frappe.db.exists.return_value = False
+		project = _StubDocument(name="PROJECT-OTHER")
+
+		for config in (
+			{},
+			{"project_company_roles": []},
+			{"project_company_roles": "Accounts User"},
+			{"project_company_roles": ["Accounts User", 7]},
+			{"project_company_roles": {"Accounts User"}},
+		):
+			with self.subTest(config=config):
+				frappe.conf = config
+				for ptype in ("read", "select", "report", "print", "export", "attach"):
+					with self.subTest(ptype=ptype):
+						self.assertFalse(
+							modules["project"].has_project_permission(
+								project, ptype=ptype, user="bookkeeper@example.com"
+							)
+						)
+
+		frappe.conf = {"project_company_roles": ["Accounts User"]}
+		for ptype in ("read", "select", "report", "print", "export"):
+			with self.subTest(ptype=ptype):
+				self.assertTrue(
+					modules["project"].has_project_permission(
+						project, ptype=ptype, user="bookkeeper@example.com"
+					)
+				)
+
 	def test_finance_oversight_role_stays_scoped_for_writes_but_can_read(self):
 		frappe, modules = _load_permission_modules()
 		frappe.conf["project_company_roles"] = ["Finance Oversight"]
