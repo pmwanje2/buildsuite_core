@@ -8,8 +8,13 @@ sums them, then layers margin + tax and allocates both across per-Work-Package
 buckets in proportion to each WP's planned share.
 """
 
+from decimal import ROUND_HALF_UP, Decimal
+
 import frappe
 from frappe.utils import flt
+
+_TOTALS = ("planned_amount", "actual_amount", "margin_amount", "tax_amount", "total")
+_WP_TOTALS = ("planned_amount", "margin_amount", "tax_amount", "total")
 
 
 def compute_boq_totals(doc):
@@ -56,8 +61,30 @@ def compute_boq_totals(doc):
 
 def recompute_boq(boq_name):
 	"""Reload + save a BOQ so its rollup refreshes after a child item changes. The
-	`boq_skip_rollup` flag lets bulk API operations defer to a single recompute."""
+	`boq_skip_rollup` flag lets bulk API operations defer to a single recompute.
+	An unchanged rollup is not saved, so no empty Version or WP summary churn."""
 	if frappe.flags.get("boq_skip_rollup"):
 		return
 	if boq_name and frappe.db.exists("BOQ", boq_name):
-		frappe.get_doc("BOQ", boq_name).save(ignore_permissions=True)
+		doc = frappe.get_doc("BOQ", boq_name)
+		stored = _rollup_state(doc)
+		doc.validate()
+		if _rollup_state(doc) != stored:
+			doc.save(ignore_permissions=True)
+
+
+def _stored(value):
+	# Currency is stored as decimal(21,9), HALF_UP: compare what the save would store.
+	return Decimal(str(flt(value))).quantize(Decimal("1e-9"), rounding=ROUND_HALF_UP)
+
+
+def _rollup_state(doc):
+	"""Every field BOQ.validate derives: company, totals and the WP summary rows."""
+	return (
+		doc.get("company"),
+		tuple(_stored(doc.get(field)) for field in _TOTALS),
+		sorted(
+			(row.get("work_package") or "", *(_stored(row.get(field)) for field in _WP_TOTALS))
+			for row in doc.get("wp_summaries") or []
+		),
+	)
