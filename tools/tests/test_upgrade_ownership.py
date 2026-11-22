@@ -90,6 +90,16 @@ class TestUpgradeOwnership(unittest.TestCase):
 		setup._grant_missing_role_perms("Lead", {"BuildSuite QS": {"read": 1}})
 		self.assert_no_permissions_written()
 
+	def test_legacy_mirror_cleanup_does_not_rewrite_a_tenant_read_grant(self):
+		self.flags.in_patch = True
+		self.get_all.side_effect = lambda dt, **_: (
+			[frappe._dict(name="TENANT-READ-RULE", parent="Unit of Measure")] if dt == "Custom DocPerm" else []
+		)
+		from buildsuite_core.patches.strip_read_mirror_overreach import execute
+
+		execute()
+		self.db.set_value.assert_not_called()
+
 	def test_permission_sync_remains_available_to_install_and_explicit_opt_in(self):
 		for flag, enabled in (("in_install", None), ("in_migrate", True)):
 			with self.subTest(flag=flag):
