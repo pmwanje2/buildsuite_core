@@ -31,6 +31,9 @@ class _StoredDoc(SimpleNamespace):
 	def __getattr__(self, _key):
 		return None
 
+	def get(self, key, default=None):
+		return vars(self).get(key, default)
+
 	def insert(self, **_kwargs):
 		return self._persist()
 

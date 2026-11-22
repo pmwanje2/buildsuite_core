@@ -23,6 +23,7 @@ def _load_permission_modules():
 	frappe.__path__ = []
 	frappe.conf = {}
 	frappe.get_roles = lambda user: []
+	frappe.get_cached_value = Mock(return_value=None)
 	frappe.session = types.SimpleNamespace(user="test@example.com")
 	frappe.db = types.SimpleNamespace(
 		exists=Mock(return_value=False),
@@ -65,6 +66,17 @@ def _load_permission_modules():
 
 
 class TestProjectCompanyRolesScope(unittest.TestCase):
+	def test_persona_team_scope_combines_with_company_read_without_widening_writes(self):
+		frappe, modules = _load_permission_modules()
+		frappe.get_roles = lambda user: ["BuildSuite Director", "Accounts User"]
+		frappe.get_cached_value.side_effect = ["Tenant persona", "Team projects only"] * 4
+		frappe.conf["project_company_roles"] = ["Accounts User"]
+		project = _StubDocument(name="PROJECT-OTHER")
+		check = modules["project"].has_project_permission
+
+		self.assertTrue(check(project, ptype="attach", user="director@example.com"))
+		self.assertFalse(check(project, ptype="write", user="director@example.com"))
+
 	def test_company_read_role_can_attach_to_unteamed_project(self):
 		frappe, modules = _load_permission_modules()
 		frappe.conf["project_company_roles"] = ["Accounts User"]
