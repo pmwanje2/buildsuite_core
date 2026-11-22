@@ -23,14 +23,24 @@ def _roles_of(definition) -> set[str]:
 	return {r for r in roles if r}
 
 
+def workflow_definitions():
+	return json.loads(_DATA.read_text())
+
+
 def seed_workflows():
 	from buildsuite_core.permissions.setup import _ensure_role
 
-	for definition in json.loads(_DATA.read_text()):
-		if frappe.db.exists("Workflow", definition["workflow_name"]):
+	for definition in workflow_definitions():
+		doctype = definition["document_type"]
+		if frappe.db.exists("Workflow", definition["workflow_name"]) or frappe.db.exists(
+			"Workflow", {"document_type": doctype}
+		):
 			continue
-		if not frappe.db.exists("DocType", definition["document_type"]):
+		if not frappe.db.exists("DocType", doctype):
 			continue
+		# The tenant's release strategy owns Material Request approval.
+		if doctype == "Material Request":
+			definition["is_active"] = 0
 		# A workflow row links to a Role and Frappe checks the link on insert. On a fresh install this
 		# runs before the BuildSuite roles are created (permissions.setup does that, later in
 		# after_install), so create any role the definition needs first; that setup finds them in place.
