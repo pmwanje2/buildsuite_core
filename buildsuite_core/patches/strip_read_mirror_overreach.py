@@ -17,7 +17,14 @@ import frappe
 
 
 def execute():
-	from buildsuite_core.permissions.setup import BUILDSUITE_ROLES, setup_child_table_read_access
+	from buildsuite_core.permissions.setup import (
+		BUILDSUITE_ROLES,
+		may_sync_permissions,
+		setup_child_table_read_access,
+	)
+
+	if not may_sync_permissions():
+		return
 
 	# Converge the mirror first (adds select on link targets, read on child tables; idempotent).
 	setup_child_table_read_access()
