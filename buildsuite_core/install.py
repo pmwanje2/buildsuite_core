@@ -318,6 +318,10 @@ def create_item_group():
 def ensure_full_day_permissions():
 	"""Company.full_day_hours sits at permlevel 1; only System Manager and BuildSuite Administrator
 	may read or edit it. Idempotent."""
+	from buildsuite_core.permissions.setup import may_sync_permissions
+
+	if not may_sync_permissions():
+		return
 	from frappe.permissions import add_permission, update_permission_property
 
 	for role in ("System Manager", "BuildSuite Administrator"):

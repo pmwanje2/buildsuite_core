@@ -19,6 +19,7 @@ CODES = [
 class TestTimesheetCosting(BuildSuiteTestCase):
 	def setUp(self):
 		super().setUp()
+		self.enterContext(patch.dict(frappe.conf, buildsuite_enable_labour_timesheets=True))
 		trade = f"Trade {self._n}"
 		frappe.get_doc({"doctype": "Labour Trade", "trade": trade}).insert(ignore_permissions=True)
 		self.project = self._make_project().name

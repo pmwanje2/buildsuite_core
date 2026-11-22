@@ -91,9 +91,7 @@ const columns = [
 	{ key: "cost_code", label: __("Cost code") },
 	{ key: "quantity", label: __("Qty"), align: "right" },
 	{ key: "total", label: __("Total cost"), align: "right" },
-	{ key: "status", label: __("Status") },
 ];
-const statusLabel = (s) => (s === 1 ? __("Submitted") : s === 2 ? __("Cancelled") : __("Draft"));
 
 const breadcrumbs = [
 	{ label: __("BuildSuite Core"), to: "/" },
@@ -201,9 +199,6 @@ const unitLabel = (unit) => (unit || "").replace(/s$/, "");
 				<template #cell-quantity="{ row }">
 					<span class="tabular-nums">{{ row.quantity }} {{ row.unit }}</span>
 				</template>
-				<template #cell-status="{ row }">
-					<span class="text-ink-700">{{ statusLabel(row.docstatus) }}</span>
-				</template>
 				<template #cell-total="{ row }">
 					<span class="tabular-nums text-ink-900 font-medium">{{
 						fmtINR(row.total)
@@ -247,9 +242,6 @@ const unitLabel = (unit) => (unit || "").replace(/s$/, "");
 								class="text-[10px] px-1.5 py-0.5 bg-ink-100 text-ink-600 rounded-full font-mono"
 								>{{ detail.name }}</span
 							>
-							<span class="text-[10px] text-ink-500">{{
-								statusLabel(detail.docstatus)
-							}}</span>
 						</div>
 						<button
 							type="button"
@@ -370,18 +362,10 @@ const unitLabel = (unit) => (unit || "").replace(/s$/, "");
 
 						<div
 							class="text-[11px]"
-							:class="
-								detail.docstatus === 1 && detail.cost_code_label
-									? 'text-ink-500'
-									: 'text-warning-700'
-							"
+							:class="detail.cost_code_label ? 'text-ink-500' : 'text-warning-700'"
 						>
 							{{
-								detail.docstatus !== 1
-									? __(
-											"Not submitted yet, so this cost is not posted to the estimate."
-									  )
-									: detail.cost_code_label
+								detail.cost_code_label
 									? __(
 											"This cost is posted to the estimate's Actual at its cost code."
 									  )

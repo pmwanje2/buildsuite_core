@@ -19,6 +19,7 @@ from frappe import _
 from frappe.utils import flt, getdate
 
 from buildsuite_core.utils.full_day import REGULAR_HOURS_SHARE, get_full_day_hours
+from buildsuite_core.utils.timesheet import labour_timesheet_hooks_enabled
 
 MAX_HOURS_IN_A_DAY = 24
 # A day is "over" only past this, so 5 h of 10 + 4.5 h of 9 (1.0 exactly) never trips on float noise.
@@ -148,7 +149,7 @@ def _regular_message(employee, booked, own_regular, total_days, full_day) -> str
 def validate_timesheet_hours(doc, method=None):
 	"""Timesheet validate (every save, and again on submit): each day the timesheet touches must fit
 	beside what the worker already has in the registers."""
-	if doc.docstatus == 2 or not doc.employee:
+	if not labour_timesheet_hooks_enabled() or doc.docstatus == 2 or not doc.employee:
 		return
 	days: dict = {}
 	for row in doc.time_logs:

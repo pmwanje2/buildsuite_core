@@ -286,8 +286,7 @@ doc_events = {
 			"buildsuite_core.utils.task.sync_stage_tasks_on_delete",
 		],
 	},
-	# Timesheet rows are costed at the worker's daily rate over their project's full day; the cost is
-	# recalculated on every draft save and frozen on submit (utils.timesheet).
+	# Opt-in workforce costing only; handlers leave native Timesheets alone by default.
 	"Timesheet": {
 		# One timesheet per worker per day, whoever creates it. Before ERPNext's own validate, so
 		# the clear message is the one shown (its overlap check would otherwise answer first).

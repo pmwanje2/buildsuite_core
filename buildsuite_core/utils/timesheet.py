@@ -24,6 +24,11 @@ COST_CODE_FIELDS = (
 )
 
 
+def labour_timesheet_hooks_enabled():
+	"""Native ERPNext Timesheets retain their own costing and lifecycle by default."""
+	return frappe.conf.get("buildsuite_enable_labour_timesheets") is True
+
+
 def field_employee_wages(employee) -> tuple[float, float]:
 	"""(daily wage, hourly overtime wage) as set on the Field Employee: the Wage and Wage For Overtime
 	of the Employee record. Timesheets cost from these two numbers and nothing else; a salary
@@ -67,7 +72,7 @@ def existing_timesheet_for_day(employee, day, exclude=None) -> str | None:
 def validate_one_timesheet_per_day(doc, method=None):
 	"""Timesheet validate: a worker has one timesheet a day, however it is created (the SPA, the
 	Desk, an import or the REST API). Put all of the day's hours on that one timesheet."""
-	if doc.docstatus == 2 or not doc.employee:
+	if not labour_timesheet_hooks_enabled() or doc.docstatus == 2 or not doc.employee:
 		return
 	days = sorted({getdate(r.from_time) for r in doc.time_logs if r.from_time})
 	for day in days:
@@ -108,7 +113,7 @@ def cost_code_fields(cost_code) -> dict:
 
 def cost_timesheet(doc, method=None):
 	"""Timesheet validate: check row cost codes, then cost every row while the timesheet is a draft."""
-	if doc.docstatus != 0:
+	if not labour_timesheet_hooks_enabled() or doc.docstatus != 0:
 		return
 	_check_cost_codes(doc)
 	if not doc.employee:
@@ -182,7 +187,11 @@ def create_registers_from_timesheet(doc, method=None):
 	day, the wage being the row's costing amount) and each overtime row an Overtime Attendance row
 	(hours, the row's overtime rate, wage = costing amount). Both keep the row's project, cost code,
 	description and the links back to the timesheet and its row."""
+	if not labour_timesheet_hooks_enabled() or not doc.employee:
+		return
 	for row in doc.time_logs:
+		if not row.project:
+			continue
 		day = getdate(row.from_time) if row.from_time else getdate(doc.start_date)
 		common = {
 			"employee": doc.employee,
@@ -224,6 +233,8 @@ def create_registers_from_timesheet(doc, method=None):
 
 def cancel_registers_of_timesheet(doc, method=None):
 	"""on_cancel: cancel every register row the timesheet made, so its cost leaves every reading."""
+	if not labour_timesheet_hooks_enabled():
+		return
 	for doctype in (LABOUR_REGISTER, OVERTIME_REGISTER):
 		for name in frappe.get_all(doctype, filters={"timesheet": doc.name, "docstatus": 1}, pluck="name"):
 			reg = frappe.get_doc(doctype, name)
@@ -234,6 +245,8 @@ def cancel_registers_of_timesheet(doc, method=None):
 def delete_registers_of_timesheet(doc, method=None):
 	"""on_trash: a timesheet can only be deleted as a draft or once cancelled, but be safe - drop
 	whatever register rows still point at it (cancelling any that are live)."""
+	if not labour_timesheet_hooks_enabled():
+		return
 	cancel_registers_of_timesheet(doc)
 	for doctype in (LABOUR_REGISTER, OVERTIME_REGISTER):
 		for name in frappe.get_all(doctype, filters={"timesheet": doc.name}, pluck="name"):

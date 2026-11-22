@@ -24,6 +24,7 @@ ITEM = {"type": "item", "group_code": "B", "item_code": "B.04", "label": "B.04 Â
 class TestTimesheetRegisters(BuildSuiteTestCase):
 	def setUp(self):
 		super().setUp()
+		self.enterContext(patch.dict(frappe.conf, buildsuite_enable_labour_timesheets=True))
 		trade = f"Trade {self._n}"
 		frappe.get_doc({"doctype": "Labour Trade", "trade": trade}).insert(ignore_permissions=True)
 		self.project = self._make_project().name

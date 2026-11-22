@@ -4016,7 +4016,7 @@ const breadcrumbs = computed(() => {
 					<p class="text-[10px] text-ink-400 mt-3">
 						{{
 							__(
-								"Every rail resolves through the cost code. Cancelling a source removes its entry — the log shows live cost only. A machinery usage log counts once submitted and drops out when cancelled. Labour counts from the attendance registers a submitted Field Attendance creates; rows without a cost code do not post."
+								"Every rail resolves through the cost code. Cancelling a source removes its entry — the log shows live cost only. A machinery usage log counts once saved and drops out when deleted. Labour counts from the attendance registers a submitted Field Attendance creates; rows without a cost code do not post."
 							)
 						}}
 					</p>

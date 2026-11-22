@@ -17,7 +17,7 @@ beneficiary. Idempotent — safe to re-run. Supersedes restore_petty_cash_expens
 
 import frappe
 
-from buildsuite_core.permissions.setup import setup_petty_cash_permissions
+from buildsuite_core.permissions.setup import may_sync_permissions, setup_petty_cash_permissions
 
 
 def _beneficiary(doctype, row):
@@ -27,6 +27,8 @@ def _beneficiary(doctype, row):
 
 
 def execute():
+	if not may_sync_permissions():
+		return
 	# Re-apply DocPerms: own-scoped roles now carry if_owner (visibility is native, not a hook).
 	setup_petty_cash_permissions()
 

@@ -187,7 +187,7 @@ const breadcrumbs = [
 					:label="__('Cost code')"
 					:hint="
 						__(
-							'Saved as a draft. Once submitted, coded usage posts quantity × rate + fuel to the BOQ Actual; uncoded usage does not.'
+							'Coded usage posts quantity × rate + fuel to the BOQ Actual. Uncoded usage does not.'
 						)
 					"
 				>

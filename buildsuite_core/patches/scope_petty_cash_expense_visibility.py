@@ -14,7 +14,7 @@ Idempotent."""
 
 import frappe
 
-from buildsuite_core.permissions.setup import setup_petty_cash_permissions
+from buildsuite_core.permissions.setup import may_sync_permissions, setup_petty_cash_permissions
 
 
 def _rehome(doctype, rows, beneficiary_of):
@@ -30,6 +30,8 @@ def _rehome(doctype, rows, beneficiary_of):
 
 
 def execute():
+	if not may_sync_permissions():
+		return
 	# 1) Apply the if_owner DocPerms (see-all vs own-only).
 	setup_petty_cash_permissions()
 

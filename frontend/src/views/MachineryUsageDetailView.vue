@@ -11,7 +11,6 @@ import { useDocTypeList } from "@/composables/useDocTypeList";
 import { useProjectNames } from "@/composables/useProjectNames";
 import { showToast } from "@/utils/appToast";
 import { createDataAdapter } from "@/data/adapters";
-import { submitMachineryUsage, cancelMachineryUsage } from "@/data/equipmentApi";
 import { fmtINR, fmtDate, currencySymbol } from "@/utils/format";
 import { __ } from "@/utils/translate";
 import DeskPage from "@/components/desk/DeskPage.vue";
@@ -28,7 +27,7 @@ const props = defineProps({ id: String });
 const router = useRouter();
 const confirmDialog = useConfirm();
 const adapter = createDataAdapter(useDataStore());
-const { canEdit, canDelete, canSubmit } = usePermissions();
+const { canEdit, canDelete } = usePermissions();
 const { projectName } = useProjectNames();
 const { errors, applyServerErrors, setErrors } = useFormErrors({ machine: "machine" });
 
@@ -58,16 +57,6 @@ const projectRes = useDocTypeList("Project", {
 });
 const projectOptions = computed(() =>
 	(projectRes.data || []).map((p) => ({ value: p.name, label: p.project_name, hint: p.name }))
-);
-
-const isDraft = computed(() => doc.value?.docstatus === 0);
-const isSubmitted = computed(() => doc.value?.docstatus === 1);
-const statusLabel = computed(() =>
-	isSubmitted.value
-		? __("Submitted")
-		: doc.value?.docstatus === 2
-		? __("Cancelled")
-		: __("Draft")
 );
 
 const editing = ref(false);
@@ -147,35 +136,6 @@ async function saveEdit() {
 	}
 }
 
-async function runLifecycle(fn, okMsg) {
-	try {
-		await fn(props.id);
-		await resource?.reload?.();
-		showToast(okMsg, "success");
-	} catch (err) {
-		showToast(err?.message || __("Action failed"), "error");
-	}
-}
-async function onSubmit() {
-	const ok = await confirmDialog({
-		title: __("Submit usage log?"),
-		message: doc.value?.cost_code_label
-			? __("Its cost will be posted to the estimate's Actual at its cost code.")
-			: __("It has no cost code, so nothing will post to the estimate."),
-		confirmLabel: __("Submit"),
-	});
-	if (ok) await runLifecycle(submitMachineryUsage, __("Usage submitted"));
-}
-async function onCancelLog() {
-	const ok = await confirmDialog({
-		title: __("Cancel usage log?"),
-		message: __("Its cost will be removed from the estimate's Actual."),
-		confirmLabel: __("Cancel log"),
-		destructive: true,
-	});
-	if (ok) await runLifecycle(cancelMachineryUsage, __("Usage cancelled"));
-}
-
 async function onDelete() {
 	const ok = await confirmDialog({
 		title: __("Delete usage entry?"),
@@ -213,7 +173,7 @@ const breadcrumbs = computed(() => [
 	>
 		<template #actions>
 			<button
-				v-if="!editing && isDraft && canEdit('machineryUsage')"
+				v-if="!editing && canEdit('machineryUsage')"
 				type="button"
 				class="text-xs px-2.5 py-1 border border-ink-200 bg-white hover:bg-ink-50 text-ink-700"
 				style="border-radius: 6px"
@@ -222,30 +182,13 @@ const breadcrumbs = computed(() => [
 				{{ __("Edit") }}
 			</button>
 			<button
-				v-if="!editing && isDraft && canDelete('machineryUsage')"
+				v-if="!editing && canDelete('machineryUsage')"
 				type="button"
 				class="text-xs px-2.5 py-1 border border-danger-200 bg-white hover:bg-danger-50 text-danger-700"
 				style="border-radius: 6px"
 				@click="onDelete"
 			>
 				{{ __("Delete") }}
-			</button>
-			<button
-				v-if="!editing && isDraft && canSubmit('machineryUsage')"
-				type="button"
-				class="desk-save-btn"
-				@click="onSubmit"
-			>
-				{{ __("Submit") }}
-			</button>
-			<button
-				v-if="!editing && isSubmitted && canSubmit('machineryUsage')"
-				type="button"
-				class="text-xs px-2.5 py-1 border border-danger-200 bg-white hover:bg-danger-50 text-danger-700"
-				style="border-radius: 6px"
-				@click="onCancelLog"
-			>
-				{{ __("Cancel") }}
 			</button>
 			<button
 				v-if="editing"
@@ -314,15 +257,10 @@ const breadcrumbs = computed(() => [
 				>
 			</DeskSection>
 			<p class="mt-3 text-xs text-ink-500">
-				<strong>{{ statusLabel }}.</strong>
 				{{
-					!doc.cost_code_label
-						? __("Not cost-coded, so this cost does not reach the estimate.")
-						: isSubmitted
+					doc.cost_code_label
 						? __("This cost is posted to the estimate's Actual at its cost code.")
-						: isDraft
-						? __("Draft — submit to post this cost to the estimate's Actual.")
-						: __("Cancelled — this cost no longer counts toward the estimate.")
+						: __("Not cost-coded, so this cost does not reach the estimate.")
 				}}
 			</p>
 		</div>

@@ -19,9 +19,10 @@ def execute():
 		DERIVED_ATTENDANCE_ROLE_PERMS,
 		HR_ATTENDANCE_REGISTER_PERMS,
 		_grant_missing_role_perms,
+		may_sync_permissions,
 	)
 
-	if not frappe.db.exists("Role", ROLE):
+	if not may_sync_permissions() or not frappe.db.exists("Role", ROLE):
 		return
 	for doctype in REGISTERS:
 		if not frappe.db.exists("DocType", doctype):

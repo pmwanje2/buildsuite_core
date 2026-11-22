@@ -14,10 +14,12 @@ earlier patch preserved in `raised_by`. Idempotent."""
 
 import frappe
 
-from buildsuite_core.permissions.setup import setup_petty_cash_permissions
+from buildsuite_core.permissions.setup import may_sync_permissions, setup_petty_cash_permissions
 
 
 def execute():
+	if not may_sync_permissions():
+		return
 	# Re-apply DocPerms without if_owner (scoping is now the finance_access hook's job).
 	setup_petty_cash_permissions()
 

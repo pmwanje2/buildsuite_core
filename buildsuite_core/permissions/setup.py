@@ -358,6 +358,13 @@ def _ensure_role(role_name):
 		).insert(ignore_permissions=True)
 
 
+def may_sync_permissions():
+	"""Installation and explicit admin actions may seed defaults; upgrades need consent."""
+	return not (frappe.flags.in_migrate or frappe.flags.in_patch) or (
+		frappe.conf.get("buildsuite_sync_permissions_on_migrate") is True
+	)
+
+
 def _grant_system_manager(doctype):
 	"""Re-grant System Manager full access on `doctype`.
 
@@ -375,7 +382,7 @@ def _grant_system_manager(doctype):
 
 
 def _apply_role_perms(doctype, role_perms, ptypes=_PTYPES):
-	if not frappe.db.exists("DocType", doctype):
+	if not may_sync_permissions() or not frappe.db.exists("DocType", doctype):
 		return
 	from frappe.permissions import add_permission, update_permission_property
 
@@ -409,7 +416,7 @@ def _grant_missing_role_perms(doctype, role_perms, ptypes=_PTYPES):
 	no rule there yet. A role that already has one — the shipped default or a site's own edit in
 	Role Permission Manager — is left exactly as it is, and nothing is ever deleted (unlike
 	_apply_role_perms, which makes the matrix authoritative and is for install only)."""
-	if not frappe.db.exists("DocType", doctype):
+	if not may_sync_permissions() or not frappe.db.exists("DocType", doctype):
 		return
 	from frappe.permissions import add_permission, update_permission_property
 
@@ -430,7 +437,7 @@ def _upgrade_role_perms(doctype, role_perms, ptypes=_PTYPES):
 	of a read mirror. Customer and Employee are readable by many roles (link pickers), but only
 	some may write/delete them; _apply_role_perms would revoke every unlisted role's read, so
 	use this to upgrade the writers while the mirror keeps the readers."""
-	if not frappe.db.exists("DocType", doctype):
+	if not may_sync_permissions() or not frappe.db.exists("DocType", doctype):
 		return
 	from frappe.permissions import add_permission, update_permission_property
 
@@ -877,6 +884,8 @@ CREW_ROLE_PERMS = {
 
 
 def setup_workforce_permissions():
+	if not may_sync_permissions():
+		return
 	_apply_role_perms("Field Attendance", FIELD_ATTENDANCE_ROLE_PERMS, _SUBMIT_PTYPES)
 	# Timesheets (native ERPNext doctype) are entered by whoever keeps the muster, with the same rights.
 	_apply_role_perms("Timesheet", FIELD_ATTENDANCE_ROLE_PERMS, _SUBMIT_PTYPES)
@@ -908,14 +917,11 @@ MACHINERY_ROLE_PERMS = {
 	"BuildSuite Foreman": _READ,
 	"BuildSuite Accountant": _READ,
 }
-# Machinery Usage (the plant usage log) — submittable: a saved log is a Draft and only a
-# submitted log posts to the BOQ Actual. The site records usage (Foreman + Store Keeper
-# create/edit drafts); Site Engineer + PM submit, cancel and amend (CRWDSX); Procurement
-# reads it as the basis for hire bills; Director + Accountant read.
+# Machinery Usage is a non-submittable log: saved coded usage posts to BOQ Actual.
 MACHINERY_USAGE_ROLE_PERMS = {
-	"BuildSuite Administrator": _FULL_SUB,
-	"BuildSuite PM": _FULL_SUB,
-	"BuildSuite Site Engineer": _FULL_SUB,
+	"BuildSuite Administrator": _FULL,
+	"BuildSuite PM": _FULL,
+	"BuildSuite Site Engineer": _FULL,
 	"BuildSuite Store Keeper": _FULL,
 	"BuildSuite Foreman": _CRW,
 	"BuildSuite Director": _READ,
@@ -937,7 +943,7 @@ MACHINERY_TYPE_ROLE_PERMS = {
 
 def setup_equipment_permissions():
 	_apply_role_perms("Machinery", MACHINERY_ROLE_PERMS)
-	_apply_role_perms("Machinery Usage", MACHINERY_USAGE_ROLE_PERMS, _SUBMIT_PTYPES)
+	_apply_role_perms("Machinery Usage", MACHINERY_USAGE_ROLE_PERMS)
 	_apply_role_perms("Machinery Type", MACHINERY_TYPE_ROLE_PERMS)
 
 
@@ -1029,6 +1035,8 @@ def setup_lead_permissions():
 def grant_missing_sales_permissions():
 	"""Existing sites: add only the sales rules a site does not have yet (see
 	_grant_missing_role_perms). Nothing is reset, lowered or deleted."""
+	if not may_sync_permissions():
+		return
 	for doctype, (role_perms, ptypes) in SALES_PERMS.items():
 		_grant_missing_role_perms(doctype, role_perms, ptypes)
 	_add_report_roles(SALES_REPORTS, LEAD_ROLE_PERMS)
@@ -1091,6 +1099,8 @@ def setup_project_finance_report_access():
 	"""Let the BuildSuite finance personas run the ERPNext reports the Project Finance tiles use.
 	Re-applied every after_migrate: ERPNext's standard-report sync rewrites the report roles, so
 	this self-heals."""
+	if not may_sync_permissions():
+		return
 	# Report roles — standard reports can't be doc.save()d (developer-mode guard), so add the
 	# Has Role child rows directly.
 	for report in _PF_ERPNEXT_REPORTS:
@@ -1183,6 +1193,8 @@ def setup_child_table_read_access():
 	  already uses for picker-only masters (see the resync_picker_select_permissions patch).
 
 	Layered on top of existing perms (never revokes), system doctypes excluded — idempotent."""
+	if not may_sync_permissions():
+		return
 	# Parents = doctypes with a REAL perm-map grant, identified by print=1 (every perm shorthand
 	# — _READ/_FULL/_RAISE/… — carries it). This excludes the mirror's OWN grants (read=1/print=0
 	# on child tables, select=1/print=0 on link targets), so a re-run doesn't treat a mirrored
@@ -1310,6 +1322,8 @@ def _mobile_perm(roles, perm):
 def setup_mobile_permissions():
 	"""Extra DocPerms for the companion mobile app, layered on the base matrix (never revokes).
 	Source: the mobile-permissions sheet — Select/Read/Write/Create/Submit/Cancel per doctype."""
+	if not may_sync_permissions():
+		return
 	full, crw, sr = tuple(_MOBILE_FULL), tuple(_MOBILE_CRW), tuple(_MOBILE_SR)
 	eng_fore = (_M_ENGINEER, _M_FOREMAN)
 	eng_fore_pm = (_M_ENGINEER, _M_FOREMAN, _M_PM)
@@ -1343,6 +1357,8 @@ def restore_role_permissions():
 	the workflows. This is the perm-only slice behind the admin 'Restore Default Permissions'
 	action; setup_record_permissions() wraps it with workflow + registry seeding for install/patch.
 	"""
+	if not may_sync_permissions():
+		return
 	setup_project_permissions()
 	setup_task_permissions()
 	setup_schedule_snapshot_permissions()

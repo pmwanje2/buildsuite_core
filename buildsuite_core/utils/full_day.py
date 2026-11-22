@@ -97,7 +97,7 @@ def validate_project_full_day_hours(doc, method=None):
 
 def _full_day_changed(doc) -> bool:
 	if doc.is_new():
-		return doc.get("full_day_hours") not in (None, "")
+		return bool(flt(doc.get("full_day_hours")))
 	before = doc.get_doc_before_save()
 	return flt(before.get("full_day_hours") if before else None) != flt(doc.get("full_day_hours"))
 
